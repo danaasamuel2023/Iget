@@ -1,7 +1,0 @@
-{
-  "dependencies": {
-    "axios": "^1.8.1",
-    "lucide-react": "^0.477.0",
-    "react-hook-form": "^7.54.2"
-  }
-}
