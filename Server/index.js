@@ -4,7 +4,7 @@ const cors = require('cors');
 const ConnectDB = require('./connection/connection.js');
 const authRoutes = require('./AuthRoutes/Auth.js');
 const dataOrderRoutes = require('./PlaceOrderRoutes/placeorder.js');
-const UserDashboard= require('./stat/page.js')
+// const UserDashboard= require('./stat/page.js')
 const AddBundle = require('./bundleRoutes/bundle.js');
 const Deposite = require('./deposite/deposite.js')
 const Orders = require('./orders/orders.js');
@@ -13,6 +13,7 @@ const userManagement = require('./Usermanagement/page.js');
 const adminCheck = require('./AdminCheck/admincheck.js')
 const DeveloperApi = require('./DeveloperApi/developer.js')
 const Ishare =  require('./isharePlace/Ishare.js')
+const UserDashboard = require('./usedashboard/page.js')
 // const Depoite = require('./routes/deposite.js');
 dotenv.config();
 
@@ -44,6 +45,7 @@ app.use('/api/admin', userManagement);
 app.use('/api/auth', adminCheck);
 app.use('/api/developer', DeveloperApi);
 app.use('/api/ishare',Ishare)
+app.use('/api/dashboard',UserDashboard)
 
 // Default Route
 app.get('/', (req, res) => {

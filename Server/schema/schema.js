@@ -1,4 +1,4 @@
-// MongoDB Schema for Bundle Selling System
+// MongoDB Schema for Bundle Selling Syste
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 

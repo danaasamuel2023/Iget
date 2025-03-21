@@ -518,94 +518,6 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
  * @desc    Get order trends by day of week for a specific user
  * @access  Private
  */
-router.get('/trends/user-weekly', auth, async (req, res) => {
-  try {
-    // Parse query parameters for date filtering
-    const startDate = req.query.startDate ? new Date(req.query.startDate) : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // Default to last 90 days
-    const endDate = req.query.endDate ? new Date(req.query.endDate) : new Date();
-    
-    // Add time to end date to include the entire day
-    endDate.setHours(23, 59, 59, 999);
-    
-    // Get the current user's orders by day of week
-    const ordersByDay = await Order.aggregate([
-      { 
-        $match: {
-          user: req.user.id,
-          createdAt: { $gte: startDate, $lte: endDate }
-        } 
-      },
-      {
-        $addFields: {
-          dayOfWeek: { $dayOfWeek: "$createdAt" }
-        }
-      },
-      {
-        $group: {
-          _id: "$dayOfWeek",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$totalAmount" }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
-    
-    // Transform data to be more readable
-    const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    
-    // Create a complete dataset with all days of the week
-    const completeData = daysOfWeek.map((day, index) => {
-      // Find if we have data for this day (note: MongoDB's $dayOfWeek is 1-based with Sunday as 1)
-      const dayData = ordersByDay.find(item => item._id === index + 1);
-      
-      return {
-        day,
-        dayIndex: index,
-        count: dayData ? dayData.count : 0,
-        totalAmount: dayData ? dayData.totalAmount : 0,
-        percentage: 0 // Will calculate below
-      };
-    });
-    
-    // Calculate total orders to compute percentages
-    const totalOrders = completeData.reduce((sum, item) => sum + item.count, 0);
-    
-    // Add percentage information
-    completeData.forEach(item => {
-      item.percentage = totalOrders > 0 ? ((item.count / totalOrders) * 100).toFixed(2) : 0;
-    });
-    
-    // Find preferred ordering day
-    let preferredOrderDay = completeData[0];
-    completeData.forEach(item => {
-      if (item.count > preferredOrderDay.count) {
-        preferredOrderDay = item;
-      }
-    });
-    
-    // Return the user's ordering patterns
-    res.status(200).json({
-      success: true,
-      data: {
-        orderPattern: completeData,
-        totalOrders,
-        preferredOrderDay: preferredOrderDay.day,
-        preferredOrderDayPercentage: preferredOrderDay.percentage,
-        dateRange: {
-          from: startDate.toISOString().split('T')[0],
-          to: endDate.toISOString().split('T')[0]
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error analyzing user weekly order trends:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
-    });
-  }
-});
 
 
 /**
@@ -735,6 +647,93 @@ router.post('/placeorder', auth, async (req, res) => {
     
   } catch (error) {
     console.error('Error placing order:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
+  }
+});
+
+
+/**
+ * @route   GET /api/orders/today/admin
+ * @desc    Get all users' orders for today along with total revenue
+ * @access  Admin
+ */
+router.get('/today/admin', adminAuth, async (req, res) => {
+  try {
+    // Get today's date at 00:00:00
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    // Get end of today at 23:59:59
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+    
+    // Find all orders made today
+    const todayOrders = await Order.find({
+      createdAt: { $gte: startOfDay, $lte: endOfDay }
+    })
+      .populate('user', 'username email phone')
+      .sort({ createdAt: -1 });
+    
+    // Calculate today's total revenue
+    const todayRevenue = todayOrders.reduce((total, order) => {
+      return total + (order.price || 0);
+    }, 0);
+    
+    // Get breakdown by bundle type
+    const bundleTypeBreakdown = await Order.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startOfDay, $lte: endOfDay }
+        }
+      },
+      {
+        $group: {
+          _id: "$bundleType",
+          count: { $sum: 1 },
+          revenue: { $sum: "$price" }
+        }
+      },
+      {
+        $sort: { revenue: -1 }
+      }
+    ]);
+    
+    // Get unique users who placed orders today
+    const uniqueUsers = new Set(todayOrders.map(order => order.user._id.toString())).size;
+    
+    // Get status breakdown
+    const statusBreakdown = await Order.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startOfDay, $lte: endOfDay }
+        }
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        }
+      }
+    ]);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        todayOrdersCount: todayOrders.length,
+        todayRevenue,
+        uniqueUsers,
+        bundleTypeBreakdown,
+        statusBreakdown,
+        todayOrders,
+        date: startOfDay.toISOString().split('T')[0]
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching today\'s orders and revenue for admin:', error);
     res.status(500).json({
       success: false,
       message: 'Server error',
