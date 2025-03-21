@@ -10,7 +10,7 @@ const userSchema = new Schema({
   phone: { type: String, required: true }, // Added phone field
   role: { 
     type: String, 
-    enum: ['admin', 'user', 'agent'], 
+    enum: ['admin', 'user', 'agent','Editor'], 
     default: 'user' 
   },
   apiKey: { type: String, unique: true },

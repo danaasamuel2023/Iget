@@ -6,6 +6,7 @@ const { Order, Bundle, User, Transaction } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth.js'); // Authentication middleware
 const adminAuth = require('../adminMiddlware/middleware.js'); // Admin authentication middleware
 const mongoose = require('mongoose');
+const verifyToken = require('../verifytoken/page.js');
 
 
 router.get('/today', auth, async (req, res) => {
@@ -57,6 +58,31 @@ router.get('/today', auth, async (req, res) => {
     });
   }
 });
+
+
+/**
+ * @route   GET /api/verify-token
+ * @desc    Verify if token is valid
+ * @access  Public
+ */
+router.get('/verify-token', verifyToken, async (req, res) => {
+  try {
+    // If the auth middleware passes, the token is valid
+    // You can return the user data if needed
+    return res.status(200).json({ 
+      valid: true,
+      user: req.user 
+    });
+  } catch (error) {
+    console.error('Token verification error:', error.message);
+    return res.status(401).json({ 
+      valid: false,
+      message: 'Token is invalid' 
+    });
+  }
+});
+
+
 
 
 

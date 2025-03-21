@@ -138,7 +138,7 @@ router.post('/register', async (req, res) => {
       email,
       password,
       phone,
-      role: 'admin' 
+      role: 'user' 
     });
     
     // Hash password
