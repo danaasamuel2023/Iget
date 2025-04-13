@@ -14,6 +14,7 @@ const adminCheck = require('./AdminCheck/admincheck.js')
 const DeveloperApi = require('./DeveloperApi/developer.js')
 const Ishare =  require('./isharePlace/Ishare.js')
 const UserDashboard = require('./usedashboard/page.js')
+const Afa = require('./afa-registration/afa.js')
 // const Depoite = require('./routes/deposite.js');
 dotenv.config();
 
@@ -46,6 +47,7 @@ app.use('/api/auth', adminCheck);
 app.use('/api/developer', DeveloperApi);
 app.use('/api/ishare',Ishare)
 app.use('/api/dashboard',UserDashboard)
+app.use('/api/afa', Afa);
 
 // Default Route
 app.get('/', (req, res) => {

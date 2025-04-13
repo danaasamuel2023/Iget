@@ -1,35 +1,65 @@
+// isharePlace/Ishare.js
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const https = require('https');
 const xml2js = require('xml2js');
 const mongoose = require('mongoose');
-const auth = require('../AuthMiddle/middlewareauth'); // Authentication middleware
+const auth = require('../AuthMiddle/middlewareauth');
 const { Order, User, Transaction } = require('../schema/schema');
 
 const router = express.Router();
 
-const ISHARE_URL ='http://41.215.168.146:443/FlexiShareBundles.asmx';
+
+const ISHARE_URL = 'http://41.215.168.146/FlexiShareBundles.asmx';
+
+// const ISHARE_URL = 'http://41.215.168.146/FlexiShareBundles.asmx';
 const ISHARE_USERNAME = 'OliverElVen';
 const ISHARE_PASSWORD = '6f44b24edb465edc97f192bab7a67d23';
 const DEALER_MSISDN = '0270054322';
 
 /**
- * Function to send a SOAP request to iShare
+ * Function to send a SOAP request to iShare with retry mechanism
  */
-async function sendSoapRequest(xml, action) {
-    try {
-        const response = await axios.post(ISHARE_URL, xml, {
-            headers: {
-                'Content-Type': 'text/xml;charset=UTF-8',
-                'SOAPAction': `http://tempuri.org/${action}`,
+async function sendSoapRequest(xml, action, retries = 3) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            console.log(`SOAP request attempt ${attempt}/${retries}`);
+            
+            const response = await axios.post(ISHARE_URL, xml, {
+                headers: {
+                    'Content-Type': 'text/xml;charset=UTF-8',
+                    'SOAPAction': `http://tempuri.org/${action}`,
+                },
+                timeout: 15000, // 15 seconds timeout
+                httpsAgent: new https.Agent({ 
+                    rejectUnauthorized: false // Only use in development for self-signed certs
+                })
+            });
+            
+            return await xml2js.parseStringPromise(response.data, { explicitArray: false });
+        } catch (error) {
+            console.error(`SOAP request attempt ${attempt} failed:`, error.message);
+            lastError = error;
+            
+            // Only retry on network errors, not on 4xx/5xx responses
+            if (!error.isAxiosError || error.response) {
+                throw error;
             }
-        });
-
-        return await xml2js.parseStringPromise(response.data, { explicitArray: false });
-    } catch (error) {
-        console.error("SOAP request failed:", error);
-        throw error;
+            
+            // Wait before retrying (exponential backoff)
+            if (attempt < retries) {
+                const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s...
+                console.log(`Retrying in ${delay/1000} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
     }
+    
+    // If all retries failed
+    throw lastError;
 }
 
 /**
@@ -38,6 +68,9 @@ async function sendSoapRequest(xml, action) {
  * @access  Private
  */
 router.post('/placeorder', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
     try {
         const { recipientNumber, capacity, price, bundleType } = req.body;
 
@@ -49,12 +82,6 @@ router.post('/placeorder', auth, async (req, res) => {
         // Ensure bundleType is "AT-iShare"
         if (bundleType !== 'AT-ishare') {
             return res.status(400).json({ success: false, message: 'Invalid bundle type. Must be AT-ishare' });
-        }
-
-        // Validate recipient number format (MSISDN format)
-        const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-        if (!phoneRegex.test(recipientNumber)) {
-            return res.status(400).json({ success: false, message: 'Invalid recipient phone number format' });
         }
 
         // Get user for wallet balance check
@@ -87,12 +114,8 @@ router.post('/placeorder', auth, async (req, res) => {
                 </soapenv:Body>
             </soapenv:Envelope>`;
 
-        // Start a database transaction session
-        const session = await mongoose.startSession();
-        session.startTransaction();
-
         try {
-            // Call iShare API
+            // Call iShare API with 
             const result = await sendSoapRequest(xmlRequest, 'FlexiIshareBundle');
             const responseMessage = result['soap:Envelope']['soap:Body']['FlexiIshareBundleResponse']['FlexiIshareBundleResult']['ApiResponse']['ResponseMsg'];
 
@@ -160,12 +183,32 @@ router.post('/placeorder', auth, async (req, res) => {
         } catch (error) {
             await session.abortTransaction();
             session.endSession();
+            
+            // Check for network connectivity issues and provide friendly message
+            if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+                console.error('Network connectivity issue with AT-iShare service:', error);
+                return res.status(503).json({ 
+                    success: false, 
+                    message: 'AT-iShare service is currently unavailable. Please try again later.' 
+                });
+            }
+            
             throw error;
         }
 
     } catch (error) {
+        // If transaction is still active, abort it
+        if (session.inTransaction()) {
+            await session.abortTransaction();
+            session.endSession();
+        }
+        
         console.error('Error placing AT-iShare order:', error);
-        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server error processing your order', 
+            error: error.message 
+        });
     }
 });
 

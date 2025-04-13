@@ -53,10 +53,9 @@ const bundleSchema = new Schema({
 const orderSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
-    ref: 'IgetUser',
+    ref: 'User',
     required: true
   },
-  // Remove bundle reference and add direct bundle properties
   bundleType: { 
     type: String, 
     enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
@@ -71,24 +70,38 @@ const orderSchema = new Schema({
     enum: ['pending', 'processing', 'completed', 'failed', 'refunded'],
     default: 'pending'
   },
+  // Metadata field to store AFA-specific registration data
+  metadata: {
+    type: Schema.Types.Mixed,
+    default: {}
+  },
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
+  updatedAt: { type: Date, default: Date.now },
+  completedAt: { type: Date },
+  failureReason: { type: String }
 });
+
 // Generate order reference before saving
 orderSchema.pre('save', function(next) {
   if (!this.orderReference) {
-    this.orderReference = 'ORD-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+    // Create different prefixes for different bundle types
+    const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
+    this.orderReference = prefix + Date.now() + '-' + Math.floor(Math.random() * 1000);
   }
+  
+  // Set completedAt date if status is being set to completed
+  if (this.status === 'completed' && !this.completedAt) {
+    this.completedAt = new Date();
+  }
+  
   next();
 });
 
-
-
-// Transaction Schema
+// Transaction Schema enhanced with metadata field
 const transactionSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
-    ref: 'IgetUser',
+    ref: 'User',
     required: true
   },
   type: { 
@@ -97,8 +110,8 @@ const transactionSchema = new Schema({
     required: true
   },
   amount: { type: Number, required: true },
-  currency: { type: String, default: 'ZAR' },
-  description: { type: String },
+  currency: { type: String, default: 'GHS' },
+  description: { type: String, required: true },
   status: { 
     type: String, 
     enum: ['pending', 'completed', 'failed'],
@@ -117,9 +130,19 @@ const transactionSchema = new Schema({
   },
   paymentMethod: { type: String },
   paymentDetails: { type: Schema.Types.Mixed },
+  // Added metadata field for AFA-specific transaction data
+  metadata: {
+    type: Schema.Types.Mixed,
+    default: {}
+  },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
+
+
+
+// Transaction Schema
+
 
 // API Request Log Schema
 const apiLogSchema = new Schema({
