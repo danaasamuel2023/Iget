@@ -321,4 +321,72 @@ router.get('/wallet/balance', apiAuth, apiLogger, async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/v1/orders/reference/:orderRef
+ * @desc    Get order details by order reference
+ * @access  Private (API Key)
+ */
+router.get('/orders/reference/:orderRef', apiAuth, apiLogger, async (req, res) => {
+  try {
+    const orderReference = req.params.orderRef;
+    
+    // Validate order reference format
+    if (!orderReference) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Order reference is required' 
+      });
+    }
+    
+    // Find the order by reference, ensuring it belongs to the authenticated user
+    const order = await Order.findOne({
+      orderReference: orderReference,
+      user: req.user.id
+    });
+
+    if (!order) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Order not found or not authorized to access' 
+      });
+    }
+
+    // Find related transaction for this order
+    const transaction = await Transaction.findOne({
+      orderId: order._id,
+      user: req.user.id
+    }).select('reference amount status');
+
+    res.status(200).json({ 
+      success: true, 
+      data: {
+        order: {
+          id: order._id,
+          orderReference: order.orderReference,
+          recipientNumber: order.recipientNumber,
+          bundleType: order.bundleType,
+          capacity: order.capacity,
+          price: order.price,
+          status: order.status,
+          createdAt: order.createdAt,
+          completedAt: order.completedAt,
+          failureReason: order.failureReason
+        },
+        transaction: transaction ? {
+          reference: transaction.reference,
+          amount: transaction.amount,
+          status: transaction.status
+        } : null
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching order by reference:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
+});
+
 module.exports = router;
