@@ -68,13 +68,13 @@ router.post('/orders/place', apiAuth, apiLogger, async (req, res) => {
     }
     
     // Validate recipient number format
-    const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-    if (!phoneRegex.test(recipientNumber)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid recipient phone number format'
-      });
-    }
+    // const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+    // if (!phoneRegex.test(recipientNumber)) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Invalid recipient phone number format'
+    //   });
+    // }
     
     // Find the matching bundle to get the correct price
     const bundle = await Bundle.findOne({ 
