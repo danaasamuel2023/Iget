@@ -98,7 +98,7 @@ orderSchema.pre('save', function(next) {
   if (!this.orderReference) {
     // Create different prefixes for different bundle types
     const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
-    this.orderReference = Math.floor(Math.random() * 1000);
+    this.orderReference = Math.floor(1000 + Math.random() * 900000);
   }
   
   // Set completedAt date if status is being set to completed
