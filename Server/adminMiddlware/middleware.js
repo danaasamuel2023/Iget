@@ -1,6 +1,6 @@
 // adminMiddleware/middleware.js
 const jwt = require('jsonwebtoken');
-const { User } = require('../schema/schema'); // Adjust path as needed
+const { User } = require('../schema/schema'); 
 
 /**
  * Middleware to verify admin privileges

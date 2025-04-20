@@ -65,7 +65,7 @@ bundleSchema.methods.getPriceForRole = function(role) {
 const orderSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
-    ref: 'User',
+    ref: 'IgetUser',
     required: true
   },
   bundleType: { 
@@ -113,7 +113,7 @@ orderSchema.pre('save', function(next) {
 const transactionSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
-    ref: 'User',
+    ref: 'IgetUser',
     required: true
   },
   type: { 
@@ -132,13 +132,13 @@ const transactionSchema = new Schema({
   reference: { type: String, unique: true },
   orderId: {
     type: Schema.Types.ObjectId,
-    ref: 'Order'
+    ref: 'IgetOrder'
   },
   balanceBefore: { type: Number },
   balanceAfter: { type: Number },
   processedBy: {
     type: Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'IgetUser'
   },
   paymentMethod: { type: String },
   paymentDetails: { type: Schema.Types.Mixed },
@@ -180,25 +180,23 @@ const settingsSchema = new Schema({
   description: { type: String },
   updatedBy: {
     type: Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'IgetUser'
   },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
 
 // Create models
-const User = mongoose.model('IgetUser', userSchema);
-const Bundle = mongoose.model('Bundle', bundleSchema);
-const Order = mongoose.model('IgetOrder', orderSchema);
-const Transaction = mongoose.model('IgetTransaction', transactionSchema);
-const ApiLog = mongoose.model('ApiLog', apiLogSchema);
-const Settings = mongoose.model('Settings', settingsSchema);
+const UserModel = mongoose.model('IgetUser', userSchema);
+const BundleModel = mongoose.model('Bundle', bundleSchema);
+const OrderModel = mongoose.model('IgetOrder', orderSchema);
+const TransactionModel = mongoose.model('IgetTransaction', transactionSchema);
 
+// Then export with the names your routes expect
 module.exports = {
-  User,
-  Bundle,
-  Order,
-  Transaction,
-  ApiLog,
-  Settings
+  User: UserModel,
+  Bundle: BundleModel,
+  Order: OrderModel,
+  Transaction: TransactionModel,
+ 
 };
