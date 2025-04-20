@@ -36,9 +36,16 @@ userSchema.methods.generateApiKey = function() {
 
 // Bundle Schema - Simplified as requested
 const bundleSchema = new Schema({
-//   name: { type: String, required: true },
   capacity: { type: Number, required: true }, // Data capacity in MB
+  // Base price
   price: { type: Number, required: true },
+  // Role-specific pricing
+  rolePricing: {
+    admin: { type: Number },
+    user: { type: Number },
+    agent: { type: Number },
+    Editor: { type: Number }
+  },
   type: { 
     type: String, 
     enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
@@ -49,6 +56,11 @@ const bundleSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+// Add a method to get price based on user role
+bundleSchema.methods.getPriceForRole = function(role) {
+  // If role-specific price exists, return it, otherwise return the base price
+  return (this.rolePricing && this.rolePricing[role]) || this.price;
+};
 // Order Schema
 const orderSchema = new Schema({
   user: {
