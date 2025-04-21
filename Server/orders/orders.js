@@ -459,30 +459,40 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     const previousStatus = order.status;
     
     // Process refund if status is being changed to refunded
-  // Process refund if status is being changed to refunded
-if (status === 'refunded' && previousStatus !== 'refunded') {
-  try {
-    // Find the user and update their account balance
-    const user = await User.findById(order.user._id);
-    if (user && user.wallet) {
-      // Add the refund amount to the user's wallet balance
-      user.wallet.balance += order.price;
-      await user.save();
-      
-      console.log(`Refunded ${order.price} to user ${user._id} for order ${order._id}`);
-    } else {
-      console.error(`User not found or wallet not initialized for refund: ${order.user._id}`);
+    if (status === 'refunded' && previousStatus !== 'refunded') {
+      try {
+        // Find the user and update their account balance
+        const user = await User.findById(order.user._id);
+        if (user && user.wallet) {
+          // Add the refund amount to the user's wallet balance
+          user.wallet.balance += order.price;
+          await user.save();
+          
+          console.log(`Refunded ${order.price} to user ${user._id} for order ${order._id}`);
+        } else {
+          console.error(`User not found or wallet not initialized for refund: ${order.user._id}`);
+        }
+      } catch (refundError) {
+        console.error('Error processing refund:', refundError.message);
+        // You might want to handle this differently, maybe even prevent the status change
+      }
     }
-  } catch (refundError) {
-    console.error('Error processing refund:', refundError.message);
-    // You might want to handle this differently, maybe even prevent the status change
-  }
-}
     
     // Update the order
     order.status = status;
     order.processedBy = req.user.id;
     order.updatedAt = Date.now();
+    
+    // Set completed date if status is now completed
+    if (status === 'completed' && previousStatus !== 'completed') {
+      order.completedAt = new Date();
+    }
+    
+    // Set failure reason if provided
+    if ((status === 'failed' || status === 'refunded') && req.body.failureReason) {
+      order.failureReason = req.body.failureReason;
+    }
+    
     await order.save();
     
     // Send SMS notifications based on status change
@@ -493,35 +503,56 @@ if (status === 'refunded' && previousStatus !== 'refunded') {
         return phone.replace(/^\+233/, '');
       };
       
-      // Get recipient's phone number from the order and format it
-      const recipientPhone = formatPhoneForSms(order.recipientNumber);
-      
-      if (status === 'completed' && previousStatus !== 'completed') {
-        // Send completion SMS
-        const completionMessage = `${order.capacity}MB has been sent to ${order.recipientNumber}              
-        iGet
-        `;
+      // Get the user's phone who placed the order
+      if (order.user && order.user.phone) {
+        const userPhone = formatPhoneForSms(order.user.phone);
         
-        await sendSMS(recipientPhone, completionMessage, {
-          useCase: 'transactional',
-          senderID: 'DataHubGh'
-        });
-        
-        console.log(`Completion SMS sent to ${recipientPhone} for order ${order._id}`);
-      } 
-      else if (status === 'failed' || status === 'refunded') {
-        // Send refund SMS to the user who placed the order
-        if (order.user && order.user.phone) {
-          const userPhone = formatPhoneForSms(order.user.phone);
-          const refundMessage = `Your order for ${order.capacity}GB on ${order.bundleType} could not be processed. Your account has been refunded. Order reference: ${order.orderReference}`;
+        if (status === 'completed' && previousStatus !== 'completed') {
+          // Determine which SMS template to use based on bundleType
+          let completionMessage = '';
+          
+          switch(order.bundleType.toLowerCase()) {
+            case 'mtnup2u':
+              // Convert MB to GB for display if necessary
+              const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+              completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
+              break;
+            case 'telecel-5959':
+              // Convert MB to GB for display if necessary
+              const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+              completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
+              break;
+            default:
+              // Convert MB to GB for display if necessary
+              const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+              completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
+              break;
+          }
+          
+          await sendSMS(userPhone, completionMessage, {
+            useCase: 'transactional',
+            senderID: 'DataHubGh'
+          });
+          
+          console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template`);
+        } 
+        else if (status === 'failed' || status === 'refunded') {
+          // Send refund SMS to the user who placed the order
+          
+          // Convert MB to GB for display if necessary
+          const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+          
+          const refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
           
           await sendSMS(userPhone, refundMessage, {
             useCase: 'transactional',
             senderID: 'DataHubGh'
           });
           
-          console.log(`Refund SMS sent to ${userPhone} for order ${order._id}`);
+          console.log(`Refund SMS sent to user ${userPhone} for order ${order._id}`);
         }
+      } else {
+        console.error(`User not found or phone number missing for order ${order._id}`);
       }
     } catch (smsError) {
       // Log SMS error but continue with response
@@ -542,7 +573,6 @@ if (status === 'refunded' && previousStatus !== 'refunded') {
     });
   }
 });
-// Add this to routes/orders.js
 
 /**
  * @route   GET /api/orders/trends/weekly
