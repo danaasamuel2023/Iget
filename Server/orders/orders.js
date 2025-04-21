@@ -7,13 +7,13 @@ const { Order, Bundle, User, Transaction } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth.js'); // Authentication middleware
 const adminAuth = require('../adminMiddlware/middleware.js'); // Admin authentication middleware
 const mongoose = require('mongoose');
-const ARKESEL_API_KEY = 'QkNhS0l2ZUZNeUdweEtmYVRUREg';
+const ARKESEL_API_KEY = 'OnFqOUpMZXYyVGRFZHJWMmo=';
 
 const sendSMS = async (phoneNumber, message, options = {}) => {
   const {
     scheduleTime = null,
     useCase = null,
-    senderID = 'DataHubGh'
+    senderID = 'EL VENDER'
   } = options;
 
   // Input validation
@@ -531,7 +531,7 @@ router.put('/:id/status', adminAuth, async (req, res) => {
           
           await sendSMS(userPhone, completionMessage, {
             useCase: 'transactional',
-            senderID: 'DataHubGh'
+            senderID: 'EL VENDER'
           });
           
           console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template`);
@@ -546,7 +546,7 @@ router.put('/:id/status', adminAuth, async (req, res) => {
           
           await sendSMS(userPhone, refundMessage, {
             useCase: 'transactional',
-            senderID: 'DataHubGh'
+            senderID: 'EL VENDER'
           });
           
           console.log(`Refund SMS sent to user ${userPhone} for order ${order._id}`);
