@@ -10,52 +10,52 @@ const mongoose = require('mongoose');
  * API Request Logger Middleware
  * Logs API requests with request/response details
  */
-const apiLogger = async (req, res, next) => {
-  // Store original send function
-  const originalSend = res.send;
+// const apiLogger = async (req, res, next) => {
+//   // Store original send function
+//   const originalSend = res.send;
   
-  // Start time for execution time calculation
-  const startTime = Date.now();
+//   // Start time for execution time calculation
+//   const startTime = Date.now();
   
-  // Override send function to capture response data
-  res.send = function(data) {
-    const responseData = JSON.parse(data);
-    const executionTime = Date.now() - startTime;
+//   // Override send function to capture response data
+//   res.send = function(data) {
+//     const responseData = JSON.parse(data);
+//     const executionTime = Date.now() - startTime;
     
-    // Create log entry
-    const logEntry = new ApiLog({
-      user: req.user ? req.user.id : null,
-      apiKey: req.header('X-API-Key'),
-      endpoint: req.originalUrl,
-      method: req.method,
-      requestData: {
-        body: req.body,
-        params: req.params,
-        query: req.query
-      },
-      responseData: responseData,
-      ipAddress: req.ip,
-      status: res.statusCode,
-      executionTime: executionTime
-    });
+//     // Create log entry
+//     const logEntry = new ApiLog({
+//       user: req.user ? req.user.id : null,
+//       apiKey: req.header('X-API-Key'),
+//       endpoint: req.originalUrl,
+//       method: req.method,
+//       requestData: {
+//         body: req.body,
+//         params: req.params,
+//         query: req.query
+//       },
+//       responseData: responseData,
+//       ipAddress: req.ip,
+//       status: res.statusCode,
+//       executionTime: executionTime
+//     });
     
-    // Save log entry (don't await to avoid delaying response)
-    logEntry.save().catch(err => console.error('Error saving API log:', err));
+//     // Save log entry (don't await to avoid delaying response)
+//     logEntry.save().catch(err => console.error('Error saving API log:', err));
     
-    // Call original send function
-    originalSend.call(this, data);
-    return this;
-  };
+//     // Call original send function
+//     originalSend.call(this, data);
+//     return this;
+//   };
   
-  next();
-};
+//   next();
+// };
 
 /**
  * @route   POST /api/v1/orders/place
  * @desc    Place an order using API key auth
  * @access  Private (API Key)
  */
-router.post('/orders/place', apiAuth, apiLogger, async (req, res) => {
+router.post('/orders/place', apiAuth, async (req, res) => {
   try {
     const { recipientNumber, capacity, bundleType } = req.body;
     
@@ -201,7 +201,7 @@ router.post('/orders/place', apiAuth, apiLogger, async (req, res) => {
  * @desc    Get all orders for the API user
  * @access  Private (API Key)
  */
-router.get('/orders', apiAuth, apiLogger, async (req, res) => {
+router.get('/orders', apiAuth, async (req, res) => {
   try {
     // Pagination parameters
     const page = parseInt(req.query.page) || 1;
@@ -259,7 +259,7 @@ router.get('/orders', apiAuth, apiLogger, async (req, res) => {
  * @desc    Get specific order details
  * @access  Private (API Key)
  */
-router.get('/orders/:id', apiAuth, apiLogger, async (req, res) => {
+router.get('/orders/:id', apiAuth, async (req, res) => {
   try {
     const order = await Order.findOne({
       _id: req.params.id,
@@ -292,7 +292,7 @@ router.get('/orders/:id', apiAuth, apiLogger, async (req, res) => {
  * @desc    Get wallet balance
  * @access  Private (API Key)
  */
-router.get('/wallet/balance', apiAuth, apiLogger, async (req, res) => {
+router.get('/wallet/balance', apiAuth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
       .select('wallet.balance wallet.currency');
@@ -326,7 +326,7 @@ router.get('/wallet/balance', apiAuth, apiLogger, async (req, res) => {
  * @desc    Get order details by order reference
  * @access  Private (API Key)
  */
-router.get('/orders/reference/:orderRef', apiAuth, apiLogger, async (req, res) => {
+router.get('/orders/reference/:orderRef', apiAuth, async (req, res) => {
   try {
     const orderReference = req.params.orderRef;
     
