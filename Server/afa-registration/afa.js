@@ -26,7 +26,7 @@ router.post('/register', auth, async (req, res) => {
     } = req.body;
     
     // Validate required fields
-    if (!phoneNumber || !price || !fullName || !idType || !idNumber || !dateOfBirth || !occupation || !location) {
+    if (!phoneNumber || !price || !fullName ) {
       return res.status(400).json({ 
         success: false, 
         error: 'Missing required fields' 

@@ -109,7 +109,7 @@ const sendSMS = async (phoneNumber, message, options = {}) => {
   }
 };
 
-router.post('/placeorder', auth, async (req, res) => {
+router.post('/placeord', auth, async (req, res) => {
   try {
     const { recipientNumber, capacity, price, bundleType } = req.body;
     
@@ -122,13 +122,13 @@ router.post('/placeorder', auth, async (req, res) => {
     }
     
     // Validate recipient number format
-    const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-    if (!phoneRegex.test(recipientNumber)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid recipient phone number format'
-      });
-    }
+    // const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+    // if (!phoneRegex.test(recipientNumber)) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Invalid recipient phone number format'
+    //   });
+    // }
     
     // Get user for wallet balance check
     const user = await User.findById(req.user.id);
