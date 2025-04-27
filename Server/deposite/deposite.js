@@ -7,7 +7,7 @@ const { Transaction, User } = require('../schema/schema');
 const authMiddleware = require('../AuthMiddle/middlewareauth');
 
 // Set your Paystack secret key
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_test_your_paystack_test_key';
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_live_0fba72fb9c4fc71200d2e0cdbb4f2b37c1de396c';
 const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
 /**
