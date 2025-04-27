@@ -194,7 +194,7 @@ const verifyTransaction = async (req, res) => {
     // Redirect or respond based on context
     if (req.headers['accept'] && req.headers['accept'].includes('text/html')) {
       // Redirect to a success page if accessed via browser
-      return res.redirect(`/deposit/success?reference=${reference}`);
+      return res.redirect(`http://localhost:3000/verify?reference=${reference}`);
     } else {
       // Return JSON if API call
       return res.status(200).json({
