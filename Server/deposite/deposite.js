@@ -71,7 +71,7 @@ const initiateDeposit = async (req, res) => {
         email: email,
         amount: amount, // Amount in kobo (pesewas)
         reference: reference,
-        callback_url: `https://www.datamartgh.shop/payment/callback?reference=${reference}`,
+        callback_url: `https://console.igetghana.com//verify?reference=${reference}`,
         metadata: {
           userId: user._id.toString(),
           transactionId: transaction._id.toString()
