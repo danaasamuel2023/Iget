@@ -51,40 +51,13 @@ const mongoose = require('mongoose');
 // };
 
 /**
- * Generate a random reference if not provided by the developer
- * Format: API followed by 3 digits
- * @returns {string} A reference string in format "API123"
- */
-const generateReference = () => {
-  // Start with "API"
-  let result = 'API';
-  
-  // Add 3 random digits
-  for (let i = 0; i < 3; i++) {
-    result += Math.floor(Math.random() * 10); // Random digit (0-9)
-  }
-  
-  return result;
-};
-
-/**
- * Validate custom reference format (4-7 alphanumeric characters)
- * @param {string} reference - The reference to validate
- * @returns {boolean} Whether the reference is valid
- */
-const isValidReference = (reference) => {
-  const referenceRegex = /^[A-Za-z0-9]{4,7}$/;
-  return referenceRegex.test(reference);
-};
-
-/**
  * @route   POST /api/v1/orders/place
  * @desc    Place an order using API key auth
  * @access  Private (API Key)
  */
 router.post('/orders/place', apiAuth, async (req, res) => {
   try {
-    const { recipientNumber, capacity, bundleType, customReference } = req.body;
+    const { recipientNumber, capacity, bundleType } = req.body;
     
     // Validate required fields
     if (!recipientNumber || !capacity || !bundleType) {
@@ -92,21 +65,6 @@ router.post('/orders/place', apiAuth, async (req, res) => {
         success: false,
         message: 'Recipient number, capacity, and bundle type are all required'
       });
-    }
-    
-    // Validate custom reference if provided
-    let orderReference;
-    if (customReference) {
-      if (!isValidReference(customReference)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Custom reference must be between 4-7 alphanumeric characters'
-        });
-      }
-      orderReference = customReference;
-    } else {
-      // Generate a reference if not provided
-      orderReference = generateReference();
     }
     
     // Validate recipient number format
@@ -165,7 +123,6 @@ router.post('/orders/place', apiAuth, async (req, res) => {
         price: price,  // Using price from the bundle record
         recipientNumber: recipientNumber,
         status: 'pending',
-        orderReference: orderReference, // Set the custom or generated reference
         updatedAt: Date.now()
       });
       
