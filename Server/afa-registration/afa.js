@@ -68,7 +68,7 @@ router.post('/register', auth, async (req, res) => {
         capacity: randomCapacity,
         price: price,
         recipientNumber: phoneNumber,
-        status: 'completed', // Mark as completed immediately
+        status: 'pending', // Mark as completed immediately
         orderReference: orderReference,
         // Store additional AFA registration data in a metadata field
         metadata: {

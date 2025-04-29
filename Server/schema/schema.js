@@ -77,9 +77,14 @@ const orderSchema = new Schema({
   price: { type: Number, required: true },
   recipientNumber: { type: String, required: true },
   orderReference: { type: String, unique: true },
+  
+  // Added API-specific fields
+  apiReference: { type: String }, // To store the API reference number
+  apiOrderId: { type: String },   // To store the API order ID
+  
   status: { 
     type: String, 
-    enum: ['pending', 'processing', 'completed', 'failed', 'refunded'],
+    enum: ['initiated', 'pending', 'processing', 'completed', 'failed', 'refunded', 'api_error'],
     default: 'pending'
   },
   // Metadata field to store AFA-specific registration data
@@ -96,18 +101,29 @@ const orderSchema = new Schema({
 // Generate order reference before saving
 orderSchema.pre('save', function(next) {
   if (!this.orderReference) {
-    // Create different prefixes for different bundle types
-    const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
-    this.orderReference = Math.floor(1000 + Math.random() * 900000);
+    // For API orders, check if we have an apiReference to use
+    if (this.apiReference) {
+      this.orderReference = this.apiReference;
+    } else {
+      // Create different prefixes for different bundle types
+      const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
+      this.orderReference = Math.floor(1000 + Math.random() * 900000);
+    }
   }
   
-  // Set completedAt date if status is being set to completed
-  if (this.status === 'completed' && !this.completedAt) {
-    this.completedAt = new Date();
+  // Update timestamps
+  if (this.isModified('status')) {
+    this.updatedAt = new Date();
+    
+    // Only set completedAt if status is specifically changed to 'completed'
+    if (this.status === 'completed' && !this.completedAt) {
+      this.completedAt = new Date();
+    }
   }
   
   next();
 });
+
 
 // Transaction Schema enhanced with metadata field
 const transactionSchema = new Schema({
@@ -126,7 +142,7 @@ const transactionSchema = new Schema({
   description: { type: String, required: true },
   status: { 
     type: String, 
-    enum: ['pending', 'completed', 'failed'],
+    enum: ['pending', 'completed', 'failed','api_error'],
     default: 'pending'
   },
   reference: { type: String, unique: true },
