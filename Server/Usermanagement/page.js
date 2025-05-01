@@ -4,8 +4,7 @@ const { User, Transaction } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth'); 
 const adminAuth = require('../adminMiddlware/middleware'); 
 
-
-// GET all users (admin only)
+// GET all users (admin only) - Existing endpoint
 router.get('/users', auth, adminAuth, async (req, res) => {
     try {
         // Add pagination support
@@ -45,9 +44,6 @@ router.get('/users', auth, adminAuth, async (req, res) => {
         // Add pagination metadata
         const totalPages = Math.ceil(total / limit);
         
-        // Log the API request
-       
-        
         res.status(200).json({
             success: true,
             data: users,
@@ -70,6 +66,333 @@ router.get('/users', auth, adminAuth, async (req, res) => {
         });
     }
 });
+
+// GET user's transaction history (admin only)
+router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        
+        // Verify user exists
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+        
+        // Add pagination support
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const skip = (page - 1) * limit;
+        
+        // Add filtering options
+        const filter = { user: userId };
+        
+        if (req.query.type) {
+            filter.type = req.query.type;
+        }
+        
+        if (req.query.startDate && req.query.endDate) {
+            filter.createdAt = {
+                $gte: new Date(req.query.startDate),
+                $lte: new Date(req.query.endDate)
+            };
+        }
+        
+        // Count total transactions for pagination metadata
+        const total = await Transaction.countDocuments(filter);
+        
+        // Fetch transactions with admin details
+        const transactions = await Transaction.find(filter)
+            .populate({
+                path: 'processedBy',
+                select: 'username email'
+            })
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+        
+        // Add pagination metadata
+        const totalPages = Math.ceil(total / limit);
+        
+        res.status(200).json({
+            success: true,
+            data: transactions,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages,
+                hasNextPage: page < totalPages,
+                hasPrevPage: page > 1
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching transactions:', error);
+        
+        res.status(500).json({
+            success: false,
+            message: 'Server error while fetching transactions',
+            error: error.message
+        });
+    }
+});
+
+// GET all transactions (admin only)
+router.get('/transactions', auth, adminAuth, async (req, res) => {
+    try {
+        // Add pagination support
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const skip = (page - 1) * limit;
+        
+        // Add filtering options
+        const filter = {};
+        
+        if (req.query.type) {
+            filter.type = req.query.type;
+        }
+        
+        if (req.query.userId) {
+            filter.user = req.query.userId;
+        }
+        
+        if (req.query.startDate && req.query.endDate) {
+            filter.createdAt = {
+                $gte: new Date(req.query.startDate),
+                $lte: new Date(req.query.endDate)
+            };
+        }
+        
+        // Count total documents for pagination metadata
+        const total = await Transaction.countDocuments(filter);
+        
+        // Fetch transactions with related user and admin details
+        const transactions = await Transaction.find(filter)
+            .populate({
+                path: 'user',
+                select: 'username email'
+            })
+            .populate({
+                path: 'processedBy',
+                select: 'username email'
+            })
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+        
+        // Add pagination metadata
+        const totalPages = Math.ceil(total / limit);
+        
+        res.status(200).json({
+            success: true,
+            data: transactions,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages,
+                hasNextPage: page < totalPages,
+                hasPrevPage: page > 1
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching transactions:', error);
+        
+        res.status(500).json({
+            success: false,
+            message: 'Server error while fetching transactions',
+            error: error.message
+        });
+    }
+});
+
+// POST add money to user wallet (admin only)
+router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) => {
+    try {
+        const { amount, description, paymentMethod, paymentDetails } = req.body;
+        
+        if (!amount || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({ 
+                success: false,
+                message: 'Valid amount is required' 
+            });
+        }
+        
+        const user = await User.findById(req.params.userId);
+        
+        if (!user) {
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
+        }
+        
+        // Get admin information
+        const admin = await User.findById(req.user.id).select('username email');
+        
+        // Perform wallet operation
+        const balanceBefore = user.wallet ? user.wallet.balance || 0 : 0;
+        
+        // Initialize wallet if it doesn't exist
+        if (!user.wallet) {
+            user.wallet = {
+                balance: 0,
+                currency: 'USD',
+                transactions: []
+            };
+        }
+        
+        user.wallet.balance = balanceBefore + parseFloat(amount);
+        const balanceAfter = user.wallet.balance;
+        user.updatedAt = Date.now();
+        
+        // Create transaction record with admin tracking
+        const transaction = new Transaction({
+            user: user._id,
+            type: 'deposit',
+            amount: parseFloat(amount),
+            currency: user.wallet.currency || 'USD',
+            description: description || 'Admin deposit',
+            status: 'completed',
+            reference: 'DEP-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+            balanceBefore,
+            balanceAfter,
+            processedBy: req.user.id,
+            processedByInfo: {
+                username: admin.username,
+                email: admin.email
+            },
+            paymentMethod: paymentMethod || 'admin',
+            paymentDetails: paymentDetails || { method: 'manual', by: admin.username }
+        });
+        
+        await transaction.save();
+        
+        // Add transaction to user's wallet transactions
+        if (!user.wallet.transactions) {
+            user.wallet.transactions = [];
+        }
+        
+        user.wallet.transactions.push(transaction._id);
+        await user.save();
+        
+        res.status(200).json({
+            success: true,
+            message: 'Funds added successfully',
+            transaction: {
+                id: transaction._id,
+                type: 'deposit',
+                amount: transaction.amount,
+                balanceBefore,
+                balanceAfter,
+                reference: transaction.reference,
+                processedBy: admin.username,
+                date: transaction.createdAt
+            }
+        });
+    } catch (error) {
+        console.error('Error adding funds to wallet:', error);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error', 
+            error: error.message 
+        });
+    }
+});
+
+// POST deduct money from user wallet (admin only)
+router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => {
+    try {
+        const { amount, description, paymentMethod, paymentDetails } = req.body;
+        
+        if (!amount || isNaN(amount) || amount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid amount is required'
+            });
+        }
+        
+        const user = await User.findById(req.params.userId);
+        
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+        
+        // Check if user has wallet and sufficient balance
+        if (!user.wallet || user.wallet.balance < parseFloat(amount)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Insufficient wallet balance'
+            });
+        }
+        
+        // Get admin information
+        const admin = await User.findById(req.user.id).select('username email');
+        
+        const balanceBefore = user.wallet.balance;
+        user.wallet.balance = balanceBefore - parseFloat(amount);
+        const balanceAfter = user.wallet.balance;
+        user.updatedAt = Date.now();
+        
+        // Create transaction record with admin tracking
+        const transaction = new Transaction({
+            user: user._id,
+            type: 'debit',
+            amount: parseFloat(amount),
+            currency: user.wallet.currency || 'USD',
+            description: description || 'Admin debit',
+            status: 'completed',
+            reference: 'DEB-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+            balanceBefore,
+            balanceAfter,
+            processedBy: req.user.id,
+            processedByInfo: {
+                username: admin.username,
+                email: admin.email
+            },
+            paymentMethod: paymentMethod || 'admin',
+            paymentDetails: paymentDetails || { method: 'manual', by: admin.username }
+        });
+        
+        await transaction.save();
+        
+        // Add transaction to user's wallet transactions
+        if (!user.wallet.transactions) {
+            user.wallet.transactions = [];
+        }
+        
+        user.wallet.transactions.push(transaction._id);
+        await user.save();
+        
+        res.status(200).json({
+            success: true,
+            message: 'Funds deducted successfully',
+            transaction: {
+                id: transaction._id,
+                type: 'debit',
+                amount: transaction.amount,
+                balanceBefore,
+                balanceAfter,
+                reference: transaction.reference,
+                processedBy: admin.username,
+                date: transaction.createdAt
+            }
+        });
+    } catch (error) {
+        console.error('Error deducting funds from wallet:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error',
+            error: error.message
+        });
+    }
+});
+
 // DELETE a user (admin only)
 router.delete('/users/:userId', auth, adminAuth, async (req, res) => {
   try {
@@ -133,64 +456,6 @@ router.delete('/users/:userId/api-key', auth, async (req, res) => {
     res.status(200).json({ message: 'API key deleted successfully' });
   } catch (error) {
     console.error('Error deleting API key:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// POST add money to user wallet (admin only)
-router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) => {
-  try {
-    const { amount, description, paymentMethod, paymentDetails } = req.body;
-    
-    if (!amount || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ message: 'Valid amount is required' });
-    }
-    
-    const user = await User.findById(req.params.userId);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    const balanceBefore = user.wallet.balance;
-    user.wallet.balance += parseFloat(amount);
-    const balanceAfter = user.wallet.balance;
-    user.updatedAt = Date.now();
-    
-    // Create transaction record
-    const transaction = new Transaction({
-      user: user._id,
-      type: 'deposit',
-      amount: parseFloat(amount),
-      currency: user.wallet.currency,
-      description: description || 'Admin deposit',
-      status: 'completed',
-      reference: 'DEP-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
-      balanceBefore,
-      balanceAfter,
-      processedBy: req.user.id,
-      paymentMethod,
-      paymentDetails
-    });
-    
-    await transaction.save();
-    
-    // Add transaction to user's wallet transactions
-    user.wallet.transactions.push(transaction._id);
-    await user.save();
-    
-    res.status(200).json({
-      message: 'Funds added successfully',
-      transaction: {
-        id: transaction._id,
-        amount: transaction.amount,
-        balanceBefore,
-        balanceAfter,
-        reference: transaction.reference
-      }
-    });
-  } catch (error) {
-    console.error('Error adding funds to wallet:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });

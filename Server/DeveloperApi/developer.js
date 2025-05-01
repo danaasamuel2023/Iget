@@ -201,126 +201,283 @@ router.post('/orders/place', apiAuth, async (req, res) => {
  * @desc    Get all orders for the API user
  * @access  Private (API Key)
  */
-router.get('/orders', apiAuth, async (req, res) => {
+router.post('/orders/place', apiAuth, async (req, res) => {
   try {
-    // Pagination parameters
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
+    const { recipientNumber, capacity, bundleType } = req.body;
     
-    // Filtering options
-    const filter = { user: req.user.id };
-    
-    if (req.query.status) {
-      filter.status = req.query.status;
-    }
-    
-    if (req.query.bundleType) {
-      filter.bundleType = req.query.bundleType;
-    }
-    
-    // Date range filtering
-    if (req.query.startDate && req.query.endDate) {
-      filter.createdAt = {
-        $gte: new Date(req.query.startDate),
-        $lte: new Date(req.query.endDate)
-      };
-    }
-    
-    // Get total count for pagination
-    const total = await Order.countDocuments(filter);
-    
-    // Get orders with pagination
-    const orders = await Order.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-    
-    res.status(200).json({
-      success: true,
-      count: orders.length,
-      total,
-      pages: Math.ceil(total / limit),
-      currentPage: page,
-      data: orders
-    });
-  } catch (error) {
-    console.error('Error fetching API orders:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
-    });
-  }
-});
-
-/**
- * @route   GET /api/v1/orders/:id
- * @desc    Get specific order details
- * @access  Private (API Key)
- */
-router.get('/orders/:id', apiAuth, async (req, res) => {
-  try {
-    const order = await Order.findOne({
-      _id: req.params.id,
-      user: req.user.id
-    });
-
-    if (!order) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Order not found or not authorized to access' 
+    // Validate required fields
+    if (!recipientNumber || !capacity || !bundleType) {
+      return res.status(400).json({
+        success: false,
+        message: 'Recipient number, capacity, and bundle type are all required'
       });
     }
-
-    res.status(200).json({ 
-      success: true, 
-      data: order 
+    
+    // Find the matching bundle to get the correct price
+    const bundle = await Bundle.findOne({ 
+      type: bundleType,
+      capacity: capacity,
+      isActive: true
     });
-  } catch (error) {
-    console.error('Error fetching API order details:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
-    });
-  }
-});
-
-/**
- * @route   GET /api/v1/wallet/balance
- * @desc    Get wallet balance
- * @access  Private (API Key)
- */
-router.get('/wallet/balance', apiAuth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id)
-      .select('wallet.balance wallet.currency');
-
+    
+    if (!bundle) {
+      return res.status(404).json({
+        success: false,
+        message: `No active bundle found matching type ${bundleType} with capacity ${capacity}MB`
+      });
+    }
+    
+    // Use the price from the bundle record
+    const price = bundle.price;
+    
+    // Get user for wallet balance check
+    const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
-
-    res.status(200).json({ 
-      success: true, 
-      data: {
-        balance: user.wallet.balance,
-        currency: user.wallet.currency
+    
+    // Check if user has enough balance
+    if (user.wallet.balance < price) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient balance in wallet. Required: ${price} ${user.wallet.currency}`
+      });
+    }
+    
+    // Start a session for the transaction
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      // Create new order with bundle details directly embedded
+      const newOrder = new Order({
+        user: req.user.id,
+        bundleType: bundleType,
+        capacity: capacity,
+        price: price,
+        recipientNumber: recipientNumber,
+        status: 'pending',
+        updatedAt: Date.now()
+      });
+      
+      // For mtnup2u bundle types, call the Hubnet API first before processing payment
+      if (bundleType.toLowerCase() === 'mtnup2u') {
+        try {
+          // Generate unique order reference
+          const orderReference = Math.floor(1000 + Math.random() * 900000);
+          
+          // Calculate volume in MB (in case the capacity is in GB)
+          let volumeInMB = capacity;
+          if (capacity < 100) { // Assuming small numbers represent GB
+            volumeInMB = parseFloat(capacity) * 1000;
+          }
+          
+          // Log the Hubnet API request for debugging
+          console.log('Making Hubnet API request for mtnup2u bundle');
+          console.log('Request payload:', {
+            phone: recipientNumber,
+            volume: volumeInMB,
+            reference: orderReference,
+            referrer: recipientNumber
+          });
+          
+          // Make request to Hubnet API using "mtn" network (all lowercase)
+          const hubnetResponse = await fetch(`https://console.hubnet.app/live/api/context/business/transaction/mtn-new-transaction`, {
+            method: 'POST',
+            headers: {
+              'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              phone: recipientNumber,
+              volume: volumeInMB,
+              reference: orderReference,
+              referrer: recipientNumber,
+              webhook: ''
+            })
+          });
+          
+          const hubnetData = await hubnetResponse.json();
+          
+          console.log('Hubnet API Response:', hubnetData);
+          
+          if (!hubnetResponse.ok) {
+            console.error('Hubnet order failed:', hubnetData);
+            return res.status(400).json({
+              success: false,
+              message: 'Hubnet API purchase failed. No payment has been processed.',
+              error: hubnetData.message || 'Unknown error'
+            });
+          }
+          
+          // Update order with Hubnet reference
+          newOrder.apiReference = orderReference.toString();
+          newOrder.hubnetReference = orderReference.toString();
+          newOrder.orderReference = orderReference.toString();
+          newOrder.status = 'pending';
+          
+          console.log(`Hubnet mtn order placed successfully: ${orderReference}`);
+        } catch (apiError) {
+          console.error('Error calling Hubnet API:', apiError.message);
+          if (apiError.response) {
+            console.error('Response status:', apiError.response.status);
+            console.error('Response data:', apiError.response.data);
+          }
+          
+          return res.status(400).json({
+            success: false,
+            message: 'Hubnet API connection error. No payment has been processed.',
+            error: apiError.message,
+            details: apiError.response?.data || 'Connection error'
+          });
+        }
       }
-    });
+      // For AT-ishare bundle type, call the Hubnet API
+      else if (bundleType.toLowerCase() === 'at-ishare') {
+        try {
+          // Generate unique order reference
+          const orderReference = Math.floor(1000 + Math.random() * 900000);
+          
+          // Calculate volume in MB (in case the capacity is in GB)
+          let volumeInMB = capacity;
+          if (capacity < 100) { // Assuming small numbers represent GB
+            volumeInMB = parseFloat(capacity) * 1000;
+          }
+          
+          // Log the Hubnet API request for debugging
+          console.log('Making Hubnet API request for AT-ishare bundle');
+          console.log('Request payload:', {
+            phone: recipientNumber,
+            volume: volumeInMB,
+            reference: orderReference,
+            referrer: recipientNumber
+          });
+          
+          // Make request to Hubnet API
+          const hubnetResponse = await fetch(`https://console.hubnet.app/live/api/context/business/transaction/at-new-transaction`, {
+            method: 'POST',
+            headers: {
+              'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              phone: recipientNumber,
+              volume: volumeInMB,
+              reference: orderReference,
+              referrer: recipientNumber,
+              webhook: ''
+            })
+          });
+          
+          const hubnetData = await hubnetResponse.json();
+          
+          console.log('Hubnet API Response:', hubnetData);
+          
+          if (!hubnetResponse.ok) {
+            console.error('Hubnet order failed:', hubnetData);
+            return res.status(400).json({
+              success: false,
+              message: 'Hubnet API purchase failed. No payment has been processed.',
+              error: hubnetData.message || 'Unknown error'
+            });
+          }
+          
+          // Update order with Hubnet reference
+          newOrder.apiReference = orderReference.toString();
+          newOrder.hubnetReference = orderReference.toString();
+          newOrder.orderReference = orderReference.toString();
+          newOrder.status = 'completed';
+          
+          console.log(`Hubnet order placed successfully: ${orderReference}`);
+        } catch (apiError) {
+          console.error('Error calling Hubnet API:', apiError.message);
+          if (apiError.response) {
+            console.error('Response status:', apiError.response.status);
+            console.error('Response data:', apiError.response.data);
+          }
+          
+          return res.status(400).json({
+            success: false,
+            message: 'Hubnet API connection error. No payment has been processed.',
+            error: apiError.message,
+            details: apiError.response?.data || 'Connection error'
+          });
+        }
+      }
+      
+      await newOrder.save({ session });
+      
+      // Create transaction record
+      const transaction = new Transaction({
+        user: req.user.id,
+        type: 'purchase',
+        amount: price,
+        currency: user.wallet.currency,
+        description: `API: Bundle purchase: ${capacity}MB for ${recipientNumber}`,
+        status: 'completed',
+        reference: 'API-TXN-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+        orderId: newOrder._id,
+        balanceBefore: user.wallet.balance,
+        balanceAfter: user.wallet.balance - price,
+        paymentMethod: 'wallet'
+      });
+      
+      await transaction.save({ session });
+      
+      // Update user's wallet balance
+      user.wallet.balance -= price;
+      user.wallet.transactions.push(transaction._id);
+      await user.save({ session });
+      
+      // Commit the transaction
+      await session.commitTransaction();
+      session.endSession();
+      
+      // Return the created order
+      res.status(201).json({
+        success: true,
+        message: 'Order placed successfully and payment processed',
+        data: {
+          order: {
+            id: newOrder._id,
+            orderReference: newOrder.orderReference,
+            recipientNumber: newOrder.recipientNumber,
+            bundleType: newOrder.bundleType,
+            capacity: newOrder.capacity,
+            price: price,
+            status: newOrder.status,
+            createdAt: newOrder.createdAt,
+            hubnetReference: newOrder.hubnetReference
+          },
+          transaction: {
+            id: transaction._id,
+            reference: transaction.reference,
+            amount: transaction.amount,
+            status: transaction.status
+          },
+          walletBalance: user.wallet.balance
+        }
+      });
+      
+    } catch (error) {
+      // If an error occurs, abort the transaction
+      await session.abortTransaction();
+      session.endSession();
+      throw error;
+    }
+    
   } catch (error) {
-    console.error('Error fetching wallet balance:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
+    console.error('Error placing order via API:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
     });
   }
 });
-
 /**
  * @route   GET /api/v1/orders/reference/:orderRef
  * @desc    Get order details by order reference
