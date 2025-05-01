@@ -134,7 +134,7 @@ const transactionSchema = new Schema({
   },
   type: { 
     type: String, 
-    enum: ['deposit', 'withdrawal', 'purchase', 'refund', 'adjustment'],
+    enum: ['deposit', 'withdrawal', 'purchase', 'refund', 'adjustment', 'debit', 'credit'],
     required: true
   },
   amount: { type: Number, required: true },
