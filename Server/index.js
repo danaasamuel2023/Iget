@@ -15,6 +15,7 @@ const DeveloperApi = require('./DeveloperApi/developer.js')
 const Ishare =  require('./isharePlace/Ishare.js')
 const UserDashboard = require('./usedashboard/page.js')
 const Afa = require('./afa-registration/afa.js')
+const NetworkAvailability = require('./NetworkStock/rout.js'); // Import the network availability route
 // const Depoite = require('./routes/deposite.js');
 dotenv.config();
 
@@ -48,6 +49,7 @@ app.use('/api/developer', DeveloperApi);
 app.use('/api/ishare',Ishare)
 app.use('/api/dashboard',UserDashboard)
 app.use('/api/afa', Afa);
+app.use('/api/network', NetworkAvailability); // Use the network availability route
 
 // Default Route
 app.get('/', (req, res) => {
