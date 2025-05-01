@@ -17,6 +17,7 @@ const UserDashboard = require('./usedashboard/page.js')
 const Afa = require('./afa-registration/afa.js')
 const NetworkAvailability = require('./NetworkStock/rout.js'); // Import the network availability route
 // const Depoite = require('./routes/deposite.js');
+const adminMessages = require('./MessageTemplate/adminMessage.js');
 dotenv.config();
 
 // Initialize Express app
@@ -50,6 +51,7 @@ app.use('/api/ishare',Ishare)
 app.use('/api/dashboard',UserDashboard)
 app.use('/api/afa', Afa);
 app.use('/api/network', NetworkAvailability); // Use the network availability route
+app.use('/api/messages', adminMessages); // Use the message template route
 
 // Default Route
 app.get('/', (req, res) => {
