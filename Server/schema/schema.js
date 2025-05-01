@@ -156,6 +156,10 @@ const transactionSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: 'IgetUser'
   },
+  processedByInfo: {
+    username: String,
+    email: String
+  },
   paymentMethod: { type: String },
   paymentDetails: { type: Schema.Types.Mixed },
   // Added metadata field for AFA-specific transaction data

@@ -4,7 +4,7 @@ const { User, Transaction } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth'); 
 const adminAuth = require('../adminMiddlware/middleware'); 
 
-// GET all users (admin only) - Existing endpoint
+// GET all users (admin only)
 router.get('/users', auth, adminAuth, async (req, res) => {
     try {
         // Add pagination support
@@ -109,16 +109,35 @@ router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
                 path: 'processedBy',
                 select: 'username email'
             })
+            .populate({
+                path: 'user',
+                select: 'username email'
+            })
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit);
+        
+        // Process transactions to ensure processedByInfo is available
+        const processedTransactions = transactions.map(txn => {
+            const transaction = txn.toObject();
+            
+            // If processedByInfo doesn't exist but processedBy does, create it
+            if (!transaction.processedByInfo && transaction.processedBy) {
+                transaction.processedByInfo = {
+                    username: transaction.processedBy.username,
+                    email: transaction.processedBy.email
+                };
+            }
+            
+            return transaction;
+        });
         
         // Add pagination metadata
         const totalPages = Math.ceil(total / limit);
         
         res.status(200).json({
             success: true,
-            data: transactions,
+            data: processedTransactions,
             pagination: {
                 total,
                 page,
@@ -158,6 +177,14 @@ router.get('/transactions', auth, adminAuth, async (req, res) => {
             filter.user = req.query.userId;
         }
         
+        if (req.query.reference) {
+            filter.reference = { $regex: req.query.reference, $options: 'i' };
+        }
+        
+        if (req.query.description) {
+            filter.description = { $regex: req.query.description, $options: 'i' };
+        }
+        
         if (req.query.startDate && req.query.endDate) {
             filter.createdAt = {
                 $gte: new Date(req.query.startDate),
@@ -182,12 +209,27 @@ router.get('/transactions', auth, adminAuth, async (req, res) => {
             .skip(skip)
             .limit(limit);
         
+        // Process transactions to ensure processedByInfo is available
+        const processedTransactions = transactions.map(txn => {
+            const transaction = txn.toObject();
+            
+            // If processedByInfo doesn't exist but processedBy does, create it
+            if (!transaction.processedByInfo && transaction.processedBy) {
+                transaction.processedByInfo = {
+                    username: transaction.processedBy.username,
+                    email: transaction.processedBy.email
+                };
+            }
+            
+            return transaction;
+        });
+        
         // Add pagination metadata
         const totalPages = Math.ceil(total / limit);
         
         res.status(200).json({
             success: true,
-            data: transactions,
+            data: processedTransactions,
             pagination: {
                 total,
                 page,
@@ -239,7 +281,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
         if (!user.wallet) {
             user.wallet = {
                 balance: 0,
-                currency: 'USD',
+                currency: 'GHS', // Changed to GHS
                 transactions: []
             };
         }
@@ -253,7 +295,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
             user: user._id,
             type: 'deposit',
             amount: parseFloat(amount),
-            currency: user.wallet.currency || 'USD',
+            currency: user.wallet.currency || 'GHS', // Changed to GHS
             description: description || 'Admin deposit',
             status: 'completed',
             reference: 'DEP-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
@@ -344,7 +386,7 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => 
             user: user._id,
             type: 'debit',
             amount: parseFloat(amount),
-            currency: user.wallet.currency || 'USD',
+            currency: user.wallet.currency || 'GHS', // Changed to GHS
             description: description || 'Admin debit',
             status: 'completed',
             reference: 'DEB-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
@@ -465,8 +507,8 @@ router.patch('/users/:userId/role', auth, adminAuth, async (req, res) => {
   try {
     const { role } = req.body;
     
-    if (!role || !['admin', 'user', 'agent'].includes(role)) {
-      return res.status(400).json({ message: 'Valid role is required (admin, user, or agent)' });
+    if (!role || !['admin', 'user', 'agent', 'Editor'].includes(role)) {
+      return res.status(400).json({ message: 'Valid role is required (admin, user, agent, or Editor)' });
     }
     
     const user = await User.findById(req.params.userId);
