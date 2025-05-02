@@ -10,6 +10,9 @@ const authMiddleware = require('../AuthMiddle/middlewareauth');
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_live_a3c9c9ebae098fe19f77e497977d7fb33c43dabd';
 const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
+// Transaction fee percentage (2%)
+const TRANSACTION_FEE_PERCENTAGE = 2;
+
 /**
  * Initiates a deposit transaction via Paystack
  */
@@ -42,6 +45,16 @@ const initiateDeposit = async (req, res) => {
       });
     }
 
+    // Calculate transaction fee (2% of the amount)
+    const feePercentage = TRANSACTION_FEE_PERCENTAGE / 100;
+    const transactionFee = Math.round(amount * feePercentage);
+    
+    // Total amount to charge (including fee)
+    const totalAmount = amount + transactionFee;
+    
+    // Amount that will be credited to user's wallet (without fee)
+    const creditAmount = amount / 100; // Convert kobo to GHS
+
     // Generate a unique reference
     const reference = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
 
@@ -49,7 +62,7 @@ const initiateDeposit = async (req, res) => {
     const transaction = new Transaction({
       user: userId,
       type: 'deposit',
-      amount: amount / 100, // Convert kobo to GHS
+      amount: creditAmount, // This is the amount that will be credited (without fee)
       currency: 'GHS',
       description: 'Wallet deposit via Paystack',
       status: 'pending',
@@ -58,7 +71,9 @@ const initiateDeposit = async (req, res) => {
       paymentMethod: 'paystack',
       paymentDetails: {
         email: email,
-        reference: reference
+        reference: reference,
+        transactionFee: transactionFee / 100, // Fee in GHS
+        totalAmount: totalAmount / 100, // Total amount charged in GHS
       }
     });
 
@@ -69,12 +84,14 @@ const initiateDeposit = async (req, res) => {
       `${PAYSTACK_BASE_URL}/transaction/initialize`,
       {
         email: email,
-        amount: amount, // Amount in kobo (pesewas)
+        amount: totalAmount, // Total amount in kobo (pesewas) including fee
         reference: reference,
         callback_url: `https://console.igetghana.com//verify?reference=${reference}`,
         metadata: {
           userId: user._id.toString(),
-          transactionId: transaction._id.toString()
+          transactionId: transaction._id.toString(),
+          originalAmount: amount, // Original amount without fee
+          transactionFee: transactionFee, // Fee amount
         }
       },
       {
@@ -92,7 +109,10 @@ const initiateDeposit = async (req, res) => {
       data: {
         authorizationUrl: response.data.data.authorization_url,
         reference: reference,
-        transactionId: transaction._id
+        transactionId: transaction._id,
+        amount: creditAmount, // Amount that will be credited to wallet
+        transactionFee: transactionFee / 100, // Fee in GHS
+        totalAmount: totalAmount / 100 // Total amount charged in GHS
       }
     });
   } catch (error) {
@@ -140,7 +160,7 @@ const verifyTransaction = async (req, res) => {
     }
 
     // Get the metadata from Paystack response
-    const { userId, transactionId } = data.metadata;
+    const { userId, transactionId, originalAmount } = data.metadata;
 
     // Find the transaction in our database
     const transaction = await Transaction.findOne({
@@ -173,19 +193,21 @@ const verifyTransaction = async (req, res) => {
       });
     }
 
+    // Get the amount to credit to user's wallet (original amount without fee)
+    const creditAmount = originalAmount ? originalAmount / 100 : data.amount / 100;
+    
     // Update transaction details
-    const amount = data.amount / 100; // Convert from pesewas to GHS
     transaction.status = 'completed';
     transaction.balanceBefore = user.wallet.balance;
-    transaction.balanceAfter = user.wallet.balance + amount;
+    transaction.balanceAfter = user.wallet.balance + creditAmount;
     transaction.paymentDetails = {
       ...transaction.paymentDetails,
       paystack: data
     };
     transaction.updatedAt = Date.now();
 
-    // Update user wallet balance
-    user.wallet.balance += amount;
+    // Update user wallet balance with only the original amount (not including fee)
+    user.wallet.balance += creditAmount;
     user.wallet.transactions.push(transaction._id);
 
     // Save both documents
@@ -202,7 +224,8 @@ const verifyTransaction = async (req, res) => {
         message: 'Payment verified and wallet updated successfully',
         data: {
           transaction: transaction,
-          newBalance: user.wallet.balance
+          newBalance: user.wallet.balance,
+          amountCredited: creditAmount,
         }
       });
     }
@@ -254,19 +277,23 @@ const handleWebhook = async (req, res) => {
         return res.status(200).send('User not found, but webhook received');
       }
       
+      // Get the original amount (without fee) from metadata or use transaction amount
+      const originalAmount = event.data.metadata && event.data.metadata.originalAmount 
+        ? event.data.metadata.originalAmount / 100 
+        : transaction.amount;
+      
       // Update transaction details
-      const amount = event.data.amount / 100; // Convert from pesewas to GHS
       transaction.status = 'completed';
       transaction.balanceBefore = user.wallet.balance;
-      transaction.balanceAfter = user.wallet.balance + amount;
+      transaction.balanceAfter = user.wallet.balance + originalAmount;
       transaction.paymentDetails = {
         ...transaction.paymentDetails,
         paystack: event.data
       };
       transaction.updatedAt = Date.now();
       
-      // Update user wallet balance
-      user.wallet.balance += amount;
+      // Update user wallet balance with original amount (not including fee)
+      user.wallet.balance += originalAmount;
       user.wallet.transactions.push(transaction._id);
       
       // Save both documents
@@ -314,14 +341,17 @@ async function processSuccessfulPayment(reference) {
       return { success: false, message: 'User not found' };
     }
 
+    // Get the amount to credit (this should be the original amount without fee)
+    const creditAmount = transaction.amount;
+
     // Update transaction details
     transaction.status = 'completed';
     transaction.balanceBefore = user.wallet.balance;
-    transaction.balanceAfter = user.wallet.balance + transaction.amount;
+    transaction.balanceAfter = user.wallet.balance + creditAmount;
     transaction.updatedAt = Date.now();
     
     // Update user wallet balance
-    user.wallet.balance += transaction.amount;
+    user.wallet.balance += creditAmount;
     user.wallet.transactions.push(transaction._id);
     
     // Save both documents
@@ -462,4 +492,4 @@ router.get('/verify-payment', async (req, res) => {
   }
 });
 
-module.exports = router; 
+module.exports = router;
