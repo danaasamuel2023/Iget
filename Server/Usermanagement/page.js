@@ -541,4 +541,252 @@ router.patch('/users/:userId/role', auth, adminAuth, async (req, res) => {
   }
 });
 
+// GET top users with most sales in the past 6 days
+router.get('/top-sales-users', auth, adminAuth, async (req, res) => {
+    try {
+      // Calculate the date 6 days ago from today
+      const sixDaysAgo = new Date();
+      sixDaysAgo.setDate(sixDaysAgo.getDate() - 6);
+      
+      console.log('Looking for transactions since:', sixDaysAgo);
+      
+      // Aggregate transactions to find users with most sales
+      const topUsers = await Transaction.aggregate([
+        // Match transactions from the past 6 days with type 'purchase'
+        {
+          $match: {
+            createdAt: { $gte: sixDaysAgo },
+            type: 'purchase'
+          }
+        },
+        // Group by user and sum their sales
+        {
+          $group: {
+            _id: '$user',
+            totalSales: { $sum: '$amount' },
+            transactions: { $push: '$$ROOT' }
+          }
+        },
+        // Sort by total sales (descending)
+        {
+          $sort: { totalSales: -1 }
+        },
+        // Limit to top performers (default 3, configurable via query)
+        {
+          $limit: parseInt(req.query.limit) || 3
+        },
+        // Get additional user information
+        {
+          $lookup: {
+            from: 'igetusers', // Changed from 'users' to 'igetusers' to match your model
+            localField: '_id',
+            foreignField: '_id',
+            as: 'userInfo'
+          }
+        },
+        // Transform the output format
+        {
+          $project: {
+            userId: '$_id',
+            username: { $arrayElemAt: ['$userInfo.username', 0] },
+            email: { $arrayElemAt: ['$userInfo.email', 0] },
+            totalSales: 1,
+            transactionCount: { $size: '$transactions' }
+          }
+        }
+      ]);
+      
+      console.log('Found top users:', topUsers);
+      
+      res.status(200).json({
+        success: true,
+        data: topUsers,
+        period: {
+          from: sixDaysAgo,
+          to: new Date()
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error fetching top sales users:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error while fetching top sales users',
+        error: error.message
+      });
+    }
+  });
+  
+  // POST reward top sales performers
+  router.post('/reward-top-performers', auth, adminAuth, async (req, res) => {
+    try {
+      const { percentages, description } = req.body;
+      
+      // Validate input
+      if (!percentages || !Array.isArray(percentages) || percentages.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid percentages array is required'
+        });
+      }
+      
+      // Calculate date range (past 6 days)
+      const sixDaysAgo = new Date();
+      sixDaysAgo.setDate(sixDaysAgo.getDate() - 6);
+      
+      // Get top performers - Changed to match the GET route
+      const topPerformers = await Transaction.aggregate([
+        {
+          $match: {
+            createdAt: { $gte: sixDaysAgo },
+            type: 'purchase'  // Changed from 'sale' to 'purchase'
+          }
+        },
+        {
+          $group: {
+            _id: '$user',
+            totalSales: { $sum: '$amount' }
+          }
+        },
+        {
+          $sort: { totalSales: -1 }
+        },
+        {
+          $limit: 3
+        }
+      ]);
+      
+      if (topPerformers.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'No sales performers found in the past 6 days'
+        });
+      }
+      
+      // Get admin information
+      const admin = await User.findById(req.user.id).select('username email');
+      
+      // Process rewards for each top performer
+      const rewards = [];
+      
+      for (let i = 0; i < Math.min(topPerformers.length, percentages.length); i++) {
+        const performer = topPerformers[i];
+        const percentage = parseFloat(percentages[i]);
+        
+        // Validate percentage
+        if (isNaN(percentage) || percentage <= 0 || percentage > 100) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid percentage at position ${i}: must be between 0 and 100`
+          });
+        }
+        
+        // Calculate reward amount
+        const rewardAmount = (performer.totalSales * percentage) / 100;
+        
+        // Get user
+        const user = await User.findById(performer._id);
+        
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: `User with ID ${performer._id} not found`
+          });
+        }
+        
+        // Log user info for debugging
+        console.log(`Found user for reward:`, {
+          userId: user._id,
+          username: user.username,
+          email: user.email
+        });
+        
+        // Initialize wallet if it doesn't exist
+        if (!user.wallet) {
+          user.wallet = {
+            balance: 0,
+            currency: 'GHS',
+            transactions: []
+          };
+        }
+        
+        // Update user wallet
+        const balanceBefore = user.wallet.balance || 0;
+        user.wallet.balance = balanceBefore + rewardAmount;
+        const balanceAfter = user.wallet.balance;
+        user.updatedAt = Date.now();
+        
+        // Create transaction record
+        const rewardDescription = description || `Sales performance reward (${percentage}% of total sales)`;
+        const transaction = new Transaction({
+          user: user._id,
+          type: 'reward',
+          amount: rewardAmount,
+          currency: user.wallet.currency || 'GHS',
+          description: rewardDescription,
+          status: 'completed',
+          reference: 'REW-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+          balanceBefore,
+          balanceAfter,
+          processedBy: req.user.id,
+          processedByInfo: {
+            username: admin.username,
+            email: admin.email
+          },
+          paymentMethod: 'admin',
+          paymentDetails: { 
+            method: 'sales_reward',
+            percentage: percentage,
+            salesPeriod: {
+              from: sixDaysAgo,
+              to: new Date()
+            },
+            totalSales: performer.totalSales
+          }
+        });
+        
+        await transaction.save();
+        
+        // Add transaction to user's wallet transactions
+        if (!user.wallet.transactions) {
+          user.wallet.transactions = [];
+        }
+        user.wallet.transactions.push(transaction._id);
+        await user.save();
+        
+        // Add to rewards array
+        rewards.push({
+          userId: user._id,
+          username: user.username,
+          email: user.email,
+          totalSales: performer.totalSales,
+          percentage: percentage,
+          rewardAmount: rewardAmount,
+          transactionId: transaction._id
+        });
+      }
+      
+      res.status(200).json({
+        success: true,
+        message: 'Top performers rewarded successfully',
+        rewards: rewards,
+        period: {
+          from: sixDaysAgo,
+          to: new Date()
+        }
+      });
+      
+    } catch (error) {
+      console.error('Error rewarding top performers:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error while rewarding top performers',
+        error: error.message
+      });
+    }
+  });
+  
+  // POST reward top sales performers
+  
+
 module.exports = router;

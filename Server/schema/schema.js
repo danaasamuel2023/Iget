@@ -134,7 +134,7 @@ const transactionSchema = new Schema({
   },
   type: { 
     type: String, 
-    enum: ['deposit', 'withdrawal', 'purchase', 'refund', 'adjustment', 'debit', 'credit'],
+    enum: ['deposit', 'withdrawal', 'purchase', 'refund', 'adjustment', 'debit', 'credit', 'reward'],
     required: true
   },
   amount: { type: Number, required: true },
@@ -142,7 +142,7 @@ const transactionSchema = new Schema({
   description: { type: String, required: true },
   status: { 
     type: String, 
-    enum: ['pending', 'completed', 'failed','api_error'],
+    enum: ['pending', 'completed', 'failed','api_error','reward'],
     default: 'pending'
   },
   reference: { type: String, unique: true },
