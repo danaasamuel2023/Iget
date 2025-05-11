@@ -18,6 +18,7 @@ const Afa = require('./afa-registration/afa.js')
 const NetworkAvailability = require('./NetworkStock/rout.js'); // Import the network availability route
 // const Depoite = require('./routes/deposite.js');
 const adminMessages = require('./MessageTemplate/adminMessage.js');
+const AdminSettings = require('./admin-settingRoute/admin-settings.js'); // Import the AdminSettings model
 dotenv.config();
 
 // Initialize Express app
@@ -52,6 +53,7 @@ app.use('/api/dashboard',UserDashboard)
 app.use('/api/afa', Afa);
 app.use('/api/network', NetworkAvailability); // Use the network availability route
 app.use('/api/messages', adminMessages); // Use the message template route
+app.use('/api/admin/settings', AdminSettings); // Use the admin settings route
 
 // Default Route
 app.get('/', (req, res) => {
