@@ -432,7 +432,7 @@ router.get('/user/:userId', adminAuth, async (req, res) => {
  */
 router.put('/:id/status', adminAuth, async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, senderID = 'EL VENDER' } = req.body; // Extract senderID with default
     
     if (!status) {
       return res.status(400).json({
@@ -534,10 +534,10 @@ router.put('/:id/status', adminAuth, async (req, res) => {
           
           await sendSMS(userPhone, completionMessage, {
             useCase: 'transactional',
-            senderID: 'EL VENDER'
+            senderID: senderID // Use the provided senderID
           });
           
-          console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template`);
+          console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
         } 
         else if (status === 'failed' || status === 'refunded') {
           // Send refund SMS to the user who placed the order
@@ -549,10 +549,10 @@ router.put('/:id/status', adminAuth, async (req, res) => {
           
           await sendSMS(userPhone, refundMessage, {
             useCase: 'transactional',
-            senderID: 'EL VENDER'
+            senderID: senderID // Use the provided senderID
           });
           
-          console.log(`Refund SMS sent to user ${userPhone} for order ${order._id}`);
+          console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} with senderID: ${senderID}`);
         }
       } else {
         console.error(`User not found or phone number missing for order ${order._id}`);
@@ -576,6 +576,9 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     });
   }
 });
+
+
+
 
 /**
  * @route   GET /api/orders/trends/weekly
