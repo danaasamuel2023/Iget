@@ -430,9 +430,14 @@ router.get('/user/:userId', adminAuth, async (req, res) => {
  * @desc    Update order status (admin access)
  * @access  Admin
  */
+/**
+ * @route   PUT /api/orders/:id/status
+ * @desc    Update order status (admin access)
+ * @access  Admin
+ */
 router.put('/:id/status', adminAuth, async (req, res) => {
   try {
-    const { status, senderID = 'EL VENDER' } = req.body; // Extract senderID with default
+    const { status, senderID = 'EL VENDER', sendSMS = false } = req.body; // Extract sendSMS flag with default false
     
     if (!status) {
       return res.status(400).json({
@@ -498,73 +503,77 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     
     await order.save();
     
-    // Send SMS notifications based on status change
-    try {
-      // Format phone number for SMS - remove the '+' prefix
-      const formatPhoneForSms = (phone) => {
-        // Remove the '+' if it exists
-        return phone.replace(/^\+233/, '');
-      };
-      
-      // Get the user's phone who placed the order
-      if (order.user && order.user.phone) {
-        const userPhone = formatPhoneForSms(order.user.phone);
+    // Send SMS notifications based on status change only if sendSMS is true
+    if (sendSMS) {
+      try {
+        // Format phone number for SMS - remove the '+' prefix
+        const formatPhoneForSms = (phone) => {
+          // Remove the '+' if it exists
+          return phone.replace(/^\+233/, '');
+        };
         
-        if (status === 'completed' && previousStatus !== 'completed') {
-          // Determine which SMS template to use based on bundleType
-          let completionMessage = '';
+        // Get the user's phone who placed the order
+        if (order.user && order.user.phone) {
+          const userPhone = formatPhoneForSms(order.user.phone);
           
-          switch(order.bundleType.toLowerCase()) {
-            case 'mtnup2u':
-              // Convert MB to GB for display if necessary
-              const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-              completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
-              break;
-            case 'telecel-5959':
-              // Convert MB to GB for display if necessary
-              const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-              completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
-              break;
-            default:
-              // Convert MB to GB for display if necessary
-              const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-              completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
-              break;
+          if (status === 'completed' && previousStatus !== 'completed') {
+            // Determine which SMS template to use based on bundleType
+            let completionMessage = '';
+            
+            switch(order.bundleType.toLowerCase()) {
+              case 'mtnup2u':
+                // Convert MB to GB for display if necessary
+                const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+                completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
+                break;
+              case 'telecel-5959':
+                // Convert MB to GB for display if necessary
+                const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+                completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
+                break;
+              default:
+                // Convert MB to GB for display if necessary
+                const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+                completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
+                break;
+            }
+            
+            await sendSMS(userPhone, completionMessage, {
+              useCase: 'transactional',
+              senderID: senderID
+            });
+            
+            console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
+          } 
+          else if (status === 'failed' || status === 'refunded') {
+            // Send refund SMS to the user who placed the order
+            
+            // Convert MB to GB for display if necessary
+            const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+            
+            const refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+            
+            await sendSMS(userPhone, refundMessage, {
+              useCase: 'transactional',
+              senderID: senderID
+            });
+            
+            console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} with senderID: ${senderID}`);
           }
-          
-          await sendSMS(userPhone, completionMessage, {
-            useCase: 'transactional',
-            senderID: senderID // Use the provided senderID
-          });
-          
-          console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
-        } 
-        else if (status === 'failed' || status === 'refunded') {
-          // Send refund SMS to the user who placed the order
-          
-          // Convert MB to GB for display if necessary
-          const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-          
-          const refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
-          
-          await sendSMS(userPhone, refundMessage, {
-            useCase: 'transactional',
-            senderID: senderID // Use the provided senderID
-          });
-          
-          console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} with senderID: ${senderID}`);
+        } else {
+          console.error(`User not found or phone number missing for order ${order._id}`);
         }
-      } else {
-        console.error(`User not found or phone number missing for order ${order._id}`);
+      } catch (smsError) {
+        // Log SMS error but continue with response
+        console.error('Failed to send status update SMS:', smsError.message);
       }
-    } catch (smsError) {
-      // Log SMS error but continue with response
-      console.error('Failed to send status update SMS:', smsError.message);
+    } else {
+      console.log(`SMS notification skipped for order ${order._id} status update to ${status} (sendSMS=${sendSMS})`);
     }
     
     res.status(200).json({
       success: true,
-      message: 'Order status updated successfully',
+      message: `Order status updated successfully${sendSMS ? ' with SMS notification' : ' without SMS notification'}`,
       data: order
     });
   } catch (error) {
