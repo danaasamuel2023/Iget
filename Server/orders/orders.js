@@ -826,7 +826,7 @@ router.post('/placeorder', auth, async (req, res) => {
             newOrder.hubnetReference = orderReference.toString();
             
             // Set status to completed if API call was successful
-            newOrder.status = 'completed';
+            newOrder.status = 'pending';
             
             console.log(`Hubnet mtn order placed successfully: ${orderReference}`);
           } catch (apiError) {
@@ -907,7 +907,7 @@ router.post('/placeorder', auth, async (req, res) => {
             newOrder.hubnetReference = orderReference.toString();
             
             // Set status to completed if API call was successful
-            newOrder.status = 'pending';
+            newOrder.status = 'completed';
             
             console.log(`Hubnet AT order placed successfully: ${orderReference}`);
           } catch (apiError) {
