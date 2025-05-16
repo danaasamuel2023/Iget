@@ -1095,4 +1095,354 @@ router.get('/today/admin', adminAuth, async (req, res) => {
 });
 
 
+router.post('/bulk-purchase', auth, async (req, res) => {
+  // Start a mongoose session for transaction
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const { networkKey, orders } = req.body;
+    
+    // Validate request
+    if (!networkKey || !orders || !Array.isArray(orders) || orders.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid request format. Network key and orders array are required.'
+      });
+    }
+    
+    if (orders.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Maximum of 100 orders allowed in a single bulk request'
+      });
+    }
+    
+    // Get user for wallet balance check
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    // Get network configuration to validate bundles
+    const network = await NetworkConfig.findOne({ networkKey });
+    if (!network) {
+      return res.status(404).json({
+        success: false,
+        message: 'Network not found'
+      });
+    }
+    
+    if (!network.isActive) {
+      return res.status(400).json({
+        success: false,
+        message: 'This network is currently unavailable'
+      });
+    }
+    
+    // Prepare order data with pricing information
+    const processedOrders = [];
+    let totalAmount = 0;
+    
+    for (const order of orders) {
+      const { recipient, capacity } = order;
+      
+      // Validate required fields
+      if (!recipient || !capacity) {
+        return res.status(400).json({
+          success: false,
+          message: 'Each order must include recipient and capacity'
+        });
+      }
+      
+      // Find the bundle in network configuration
+      const bundle = network.bundles.find(b => b.capacity === parseFloat(capacity));
+      if (!bundle) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid bundle capacity: ${capacity} for network ${networkKey}`
+        });
+      }
+      
+      if (!bundle.isActive) {
+        return res.status(400).json({
+          success: false,
+          message: `Bundle ${capacity}GB is currently unavailable for ${networkKey}`
+        });
+      }
+      
+      const price = bundle.price;
+      const resellerPrice = bundle.resellerPrice;
+      const profit = price - resellerPrice;
+      
+      processedOrders.push({
+        recipient,
+        capacity: parseFloat(capacity),
+        price,
+        resellerPrice,
+        profit
+      });
+      
+      totalAmount += price;
+    }
+    
+    // Check wallet balance
+    if (user.wallet.balance < totalAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient wallet balance. Required: GHC ${totalAmount.toFixed(2)}, Available: GHC ${user.wallet.balance.toFixed(2)}`
+      });
+    }
+    
+    // Process all orders
+    const results = {
+      successful: 0,
+      failed: 0,
+      totalAmount: 0,
+      orders: []
+    };
+    
+    // Create a single transaction record for the bulk purchase
+    const bulkTransactionReference = new mongoose.Types.ObjectId().toString();
+    
+    // Process each order
+    for (const orderData of processedOrders) {
+      try {
+        // Generate a reference number
+        const prefix = "order";
+        const numbers = Math.floor(100000 + Math.random() * 900000).toString();
+        const reference = `${prefix}${numbers}`;
+        const transactionReference = new mongoose.Types.ObjectId().toString();
+        
+        // Variables for API responses
+        let orderResponse = null;
+        let orderId = null;
+        let apiReference = reference;
+        let orderStatus = 'onPending'; // Default status
+        
+        // Process with Telecel API if selected
+        if (networkKey === 'TELECEL') {
+          try {
+            console.log('Using Telecel API for bulk order processing...');
+            
+            // Convert GB to MB for Telecel
+            const capacityInMB = orderData.capacity;
+            
+            // Format payload for Telecel API
+            const telecelPayload = {
+              recipientNumber: orderData.recipient,
+              capacity: capacityInMB,
+              bundleType: "Telecel-5959",
+              reference: reference
+            };
+            
+            console.log('Sending order to Telecel API:', JSON.stringify(telecelPayload));
+            
+            // Call Telecel API to process the order
+            const telecelResponse = await axios.post(
+              'https://iget.onrender.com/api/developer/orders/place',
+              telecelPayload,
+              { 
+                headers: { 
+                  'Content-Type': 'application/json',
+                  'X-API-Key': '8ef44b516735ec9455c4647ae980b445b3bc0be06e5a6095088eaa9cfbeb117e'
+                } 
+              }
+            );
+            
+            console.log('Telecel API response:', JSON.stringify(telecelResponse.data));
+            
+            orderResponse = telecelResponse.data;
+            
+            // Use the reference number returned by the API if available
+            orderId = orderResponse.orderReference || orderResponse.transactionId || orderResponse.id || reference;
+            apiReference = orderResponse.orderReference || orderResponse.reference || reference;
+            
+            // Set status to processing for Telecel orders
+            orderStatus = 'processing';
+            
+            console.log(`Order created with Telecel API: Our Reference=${reference}, API Reference=${apiReference}, OrderId=${orderId}`);
+          } catch (apiError) {
+            console.error('Telecel API Error:', apiError);
+            orderStatus = 'failed';
+            
+            // Store error details
+            orderResponse = {
+              message: apiError.message,
+              response: apiError.response?.data,
+              timestamp: new Date()
+            };
+            
+            console.log('Failed to process order with Telecel: ' + apiError.message);
+          }
+        } 
+        // Process with Geonettech API if enabled for this network AND not Telecel
+        else if (network.useGeonectech && networkKey !== 'TELECEL') {
+          try {
+            console.log('Using Geonettech API for bulk order processing...');
+
+            // Check agent wallet balance from Geonettech
+            const agentWalletResponse = await axios.get(
+              'https://testhub.geonettech.site/api/v1/checkBalance',
+              {
+                headers: {
+                  Authorization: 'Bearer 44|veznurLZYf3sxLIbDADuTZFyZWsqdFme2qqx2Hbg58913b52'
+                }
+              }
+            );
+
+            const agentBalance = parseFloat(agentWalletResponse.data.data.balance.replace(/,/g, ''));
+            if (agentBalance < orderData.resellerPrice) {
+              throw new Error('Insufficient balance in agent wallet. Please contact support.');
+            }
+
+            const geonetResponse = await axios.post(
+              'https://testhub.geonettech.site/api/v1/placeOrder',
+              {
+                network_key: networkKey,
+                ref: reference,
+                recipient: orderData.recipient,
+                capacity: parseFloat(orderData.capacity)
+              },
+              {
+                headers: {
+                  Authorization:'Bearer 44|veznurLZYf3sxLIbDADuTZFyZWsqdFme2qqx2Hbg58913b52'
+                }
+              }
+            );
+
+            orderResponse = geonetResponse.data;
+            orderId = geonetResponse.data.data.orderId;
+            orderStatus = 'processing';
+            
+            console.log(`Order created with GeoNetTech: Reference=${reference}, OrderId=${orderId}`);
+          } catch (apiError) {
+            console.error('Geonettech API Error:', apiError);
+            orderStatus = 'failed';
+            
+            // Store error details
+            orderResponse = {
+              message: apiError.message,
+              response: apiError.response?.data,
+              timestamp: new Date()
+            };
+            
+            console.log('Failed to process order with Geonettech: ' + apiError.message);
+          }
+        } else {
+          // No external API - just process internally
+          console.log(`Processing order in-system for ${networkKey}`);
+          orderStatus = 'onPending';
+        }
+
+        // Create order with all details
+        const order = new OrderBoris({
+          user: user._id,
+          reference,
+          transactionReference,
+          networkKey,
+          recipient: orderData.recipient,
+          capacity: parseFloat(orderData.capacity),
+          price: orderData.price,
+          resellerPrice: orderData.resellerPrice,
+          profit: orderData.profit,
+          status: orderStatus,
+          apiOrderId: orderId,
+          apiResponse: orderResponse,
+          metadata: {
+            userBalance: user.wallet.balance,
+            orderTime: new Date(),
+            isApiOrder: true,
+            isBulkOrder: true,
+            bulkTransactionReference,
+            apiReference: apiReference
+          }
+        });
+
+        await order.save({ session });
+        
+        // Calculate results
+        if (orderStatus !== 'failed') {
+          results.successful++;
+          results.totalAmount += orderData.price;
+        } else {
+          results.failed++;
+        }
+        
+        // Add to results
+        results.orders.push({
+          recipient: orderData.recipient,
+          capacity: orderData.capacity,
+          price: orderData.price,
+          status: orderStatus,
+          reference: reference
+        });
+        
+      } catch (orderError) {
+        console.error(`Error processing individual order in bulk purchase:`, orderError);
+        
+        // Add failed order to results
+        results.failed++;
+        results.orders.push({
+          recipient: orderData.recipient,
+          capacity: orderData.capacity,
+          price: orderData.price,
+          status: 'failed',
+          error: orderError.message
+        });
+      }
+    }
+    
+    // If at least one order was successful, deduct the total amount from wallet
+    if (results.successful > 0) {
+      // Create a bulk transaction record
+      user.wallet.transactions.push({
+        type: 'debit',
+        amount: results.totalAmount,
+        reference: bulkTransactionReference,
+        description: `Bulk purchase: ${results.successful} data bundles for ${networkKey}`,
+        timestamp: new Date()
+      });
+      
+      // Update user balance
+      user.wallet.balance -= results.totalAmount;
+      await user.save({ session });
+    }
+    
+    // Commit the transaction
+    await session.commitTransaction();
+    
+    // Return results
+    res.status(200).json({
+      success: true,
+      message: `Bulk purchase processed: ${results.successful} successful, ${results.failed} failed`,
+      data: {
+        totalOrders: processedOrders.length,
+        successful: results.successful,
+        failed: results.failed,
+        totalAmount: results.totalAmount,
+        newBalance: user.wallet.balance,
+        orders: results.orders
+      }
+    });
+    
+  } catch (error) {
+    // Abort transaction on error
+    await session.abortTransaction();
+    
+    console.error('Bulk purchase error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error processing bulk purchase',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
+  }
+});
+
+
 module.exports = router;
