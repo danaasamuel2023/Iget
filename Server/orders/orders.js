@@ -437,7 +437,7 @@ router.get('/user/:userId', adminAuth, async (req, res) => {
  */
 router.put('/:id/status', adminAuth, async (req, res) => {
   try {
-    const { status, senderID = 'EL VENDER', sendSMS = true } = req.body; // Extract sendSMS flag with default false
+    const { status, senderID = 'EL VENDER', sendSMSNotification = true } = req.body; // Changed 'sendSMS' to 'sendSMSNotification'
     
     if (!status) {
       return res.status(400).json({
@@ -503,8 +503,8 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     
     await order.save();
     
-    // Send SMS notifications based on status change only if sendSMS is true
-    if (sendSMS) {
+    // Send SMS notifications based on status change only if sendSMSNotification is true
+    if (sendSMSNotification) {
       try {
         // Format phone number for SMS - remove the '+' prefix
         const formatPhoneForSms = (phone) => {
@@ -538,12 +538,17 @@ router.put('/:id/status', adminAuth, async (req, res) => {
                 break;
             }
             
-            await sendSMS(userPhone, completionMessage, {
+            // Use the imported sendSMS function from the top of the file
+            const smsResult = await sendSMS(userPhone, completionMessage, {
               useCase: 'transactional',
               senderID: senderID
             });
             
-            console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
+            if (smsResult.success) {
+              console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
+            } else {
+              console.error(`Failed to send completion SMS: ${smsResult.error?.message || 'Unknown error'}`);
+            }
           } 
           else if (status === 'failed' || status === 'refunded') {
             // Send refund SMS to the user who placed the order
@@ -553,12 +558,17 @@ router.put('/:id/status', adminAuth, async (req, res) => {
             
             const refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
             
-            await sendSMS(userPhone, refundMessage, {
+            // Use the imported sendSMS function from the top of the file
+            const smsResult = await sendSMS(userPhone, refundMessage, {
               useCase: 'transactional',
               senderID: senderID
             });
             
-            console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} with senderID: ${senderID}`);
+            if (smsResult.success) {
+              console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} with senderID: ${senderID}`);
+            } else {
+              console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
+            }
           }
         } else {
           console.error(`User not found or phone number missing for order ${order._id}`);
@@ -568,12 +578,12 @@ router.put('/:id/status', adminAuth, async (req, res) => {
         console.error('Failed to send status update SMS:', smsError.message);
       }
     } else {
-      console.log(`SMS notification skipped for order ${order._id} status update to ${status} (sendSMS=${sendSMS})`);
+      console.log(`SMS notification skipped for order ${order._id} status update to ${status} (sendSMSNotification=${sendSMSNotification})`);
     }
     
     res.status(200).json({
       success: true,
-      message: `Order status updated successfully${sendSMS ? ' with SMS notification' : ' without SMS notification'}`,
+      message: `Order status updated successfully${sendSMSNotification ? ' with SMS notification' : ' without SMS notification'}`,
       data: order
     });
   } catch (error) {
@@ -585,8 +595,6 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     });
   }
 });
-
-
 
 
 /**
