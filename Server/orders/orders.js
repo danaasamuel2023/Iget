@@ -437,7 +437,7 @@ router.get('/user/:userId', adminAuth, async (req, res) => {
  */
 router.put('/:id/status', adminAuth, async (req, res) => {
   try {
-    const { status, senderID = 'EL VENDER', sendSMS = false } = req.body; // Extract sendSMS flag with default false
+    const { status, senderID = 'EL VENDER', sendSMS = true } = req.body; // Extract sendSMS flag with default false
     
     if (!status) {
       return res.status(400).json({
