@@ -1,4 +1,4 @@
-// paystackRoutes.js - Combined routes and controller
+// paystackRoutes.js - Updated with paginated transactions route
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -366,6 +366,279 @@ async function processSuccessfulPayment(reference) {
   }
 }
 
+/**
+ * Fetches paginated transactions for a user and verifies pending transactions
+ */
+const getUserTransactionsAndVerifyPending = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Extract pagination parameters from query string
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+    
+    // Count total transactions for pagination metadata
+    const totalTransactions = await Transaction.countDocuments({ user: userId });
+    const totalPages = Math.ceil(totalTransactions / limit);
+    
+    // Find transactions with pagination
+    const transactions = await Transaction.find({ user: userId })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    // Keep track of verified transactions
+    const verifiedTransactions = [];
+    
+    // Get all pending transactions regardless of pagination for verification
+    // This ensures all pending transactions are verified even if they're not on the current page
+    const pendingTransactions = await Transaction.find({ 
+      user: userId, 
+      status: 'pending', 
+      type: 'deposit'
+    });
+    
+    if (pendingTransactions.length > 0) {
+      // Verify each pending transaction with Paystack
+      for (const transaction of pendingTransactions) {
+        try {
+          // Skip if already being processed
+          if (transaction.processing) continue;
+          
+          // Verify the transaction with Paystack
+          const paystackResponse = await axios.get(
+            `${PAYSTACK_BASE_URL}/transaction/verify/${transaction.reference}`,
+            {
+              headers: {
+                Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+          
+          const { data } = paystackResponse.data;
+          
+          // If payment was successful, process it
+          if (data.status === 'success') {
+            const result = await processSuccessfulPayment(transaction.reference);
+            if (result.success) {
+              verifiedTransactions.push({
+                transactionId: transaction._id,
+                reference: transaction.reference,
+                status: 'completed'
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`Error verifying transaction ${transaction.reference}:`, error.message);
+          // Continue with other transactions even if one fails
+        }
+      }
+      
+      // If any transactions were verified, refresh the paginated results
+      // This ensures that status changes appear immediately in the response
+      if (verifiedTransactions.length > 0) {
+        const updatedTransactions = await Transaction.find({ user: userId })
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit);
+          
+        return res.status(200).json({
+          success: true,
+          message: 'Transactions fetched and pending transactions verified',
+          data: {
+            transactions: updatedTransactions,
+            verified: verifiedTransactions,
+            pagination: {
+              totalItems: totalTransactions,
+              totalPages: totalPages,
+              currentPage: page,
+              pageSize: limit,
+              hasNextPage: page < totalPages,
+              hasPreviousPage: page > 1
+            }
+          }
+        });
+      }
+    }
+    
+    // Return transactions if none were pending or none were verified
+    return res.status(200).json({
+      success: true,
+      message: 'Transactions fetched successfully',
+      data: {
+        transactions: transactions,
+        verified: verifiedTransactions,
+        pagination: {
+          totalItems: totalTransactions,
+          totalPages: totalPages,
+          currentPage: page,
+          pageSize: limit,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching transactions:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch transactions',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Admin route to verify all pending transactions in the system
+ */
+const verifyAllPendingTransactions = async (req, res) => {
+  try {
+    // This route requires admin privileges
+    if (!req.user.isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin privileges required'
+      });
+    }
+
+    // Extract pagination parameters from query string for admin view
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    // Find all pending deposit transactions with pagination for viewing
+    const totalPendingTransactions = await Transaction.countDocuments({ 
+      status: 'pending',
+      type: 'deposit' 
+    });
+    
+    // Find pending transactions to process
+    const pendingTransactions = await Transaction.find({ 
+      status: 'pending',
+      type: 'deposit',
+      processing: { $ne: true } // Skip already processing transactions
+    })
+    .sort({ createdAt: -1 });
+
+    if (pendingTransactions.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No pending transactions found',
+        data: {
+          pagination: {
+            totalItems: totalPendingTransactions,
+            totalPages: Math.ceil(totalPendingTransactions / limit),
+            currentPage: page,
+            pageSize: limit
+          }
+        }
+      });
+    }
+
+    // Track results
+    const results = {
+      total: pendingTransactions.length,
+      verified: 0,
+      failed: 0,
+      details: []
+    };
+
+    // Process each pending transaction
+    for (const transaction of pendingTransactions) {
+      try {
+        // Verify with Paystack
+        const paystackResponse = await axios.get(
+          `${PAYSTACK_BASE_URL}/transaction/verify/${transaction.reference}`,
+          {
+            headers: {
+              Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        
+        const { data } = paystackResponse.data;
+        
+        // If successful, process payment
+        if (data.status === 'success') {
+          const result = await processSuccessfulPayment(transaction.reference);
+          
+          if (result.success) {
+            results.verified++;
+            results.details.push({
+              reference: transaction.reference,
+              status: 'completed',
+              message: 'Successfully verified and processed'
+            });
+          } else {
+            results.failed++;
+            results.details.push({
+              reference: transaction.reference,
+              status: 'failed',
+              message: result.message
+            });
+          }
+        } else {
+          results.failed++;
+          results.details.push({
+            reference: transaction.reference,
+            status: 'failed',
+            message: `Payment not successful: ${data.status}`
+          });
+        }
+      } catch (error) {
+        results.failed++;
+        results.details.push({
+          reference: transaction.reference,
+          status: 'error',
+          message: error.message
+        });
+      }
+    }
+
+    // Get updated paginated list of pending transactions
+    const updatedPendingTransactions = await Transaction.find({ 
+      status: 'pending',
+      type: 'deposit'
+    })
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit);
+
+    // Get updated count for pagination
+    const newTotalPendingTransactions = await Transaction.countDocuments({ 
+      status: 'pending',
+      type: 'deposit' 
+    });
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Verification process completed',
+      data: {
+        results: results,
+        pendingTransactions: updatedPendingTransactions,
+        pagination: {
+          totalItems: newTotalPendingTransactions,
+          totalPages: Math.ceil(newTotalPendingTransactions / limit),
+          currentPage: page,
+          pageSize: limit,
+          hasNextPage: page < Math.ceil(newTotalPendingTransactions / limit),
+          hasPreviousPage: page > 1
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error verifying all pending transactions:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to verify pending transactions',
+      error: error.message
+    });
+  }
+};
+
 // Routes definition
 // Protected route - requires authentication
 router.post('/deposit', authMiddleware, initiateDeposit);
@@ -416,7 +689,7 @@ router.get('/verify-payment', async (req, res) => {
       try {
         // Verify the transaction status with Paystack
         const paystackResponse = await axios.get(
-          `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
+          `${PAYSTACK_BASE_URL}/transaction/verify/${transaction.reference}`,
           {
             headers: {
               Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
@@ -491,5 +764,9 @@ router.get('/verify-payment', async (req, res) => {
     });
   }
 });
+
+// Routes for user transactions and verifying pending transactions
+router.get('/transactions', authMiddleware, getUserTransactionsAndVerifyPending);
+router.get('/verify-all-pending', authMiddleware, verifyAllPendingTransactions);
 
 module.exports = router;
