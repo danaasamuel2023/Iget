@@ -177,7 +177,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
               console.error('Hubnet order failed:', hubnetData);
               return res.status(400).json({
                 success: false,
-                message: 'Hubnet API purchase failed. No payment has been processed.',
+                message: 'purchase failed. No payment has been processed.',
                 error: hubnetData.message || 'Unknown error'
               });
             }
@@ -199,7 +199,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             
             return res.status(400).json({
               success: false,
-              message: 'Hubnet API connection error. No payment has been processed.',
+              message: ' connection error. No payment has been processed.',
               error: apiError.message,
               details: apiError.response?.data || 'Connection error'
             });
@@ -258,7 +258,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
               console.error('Hubnet order failed:', hubnetData);
               return res.status(400).json({
                 success: false,
-                message: 'Hubnet API purchase failed. No payment has been processed.',
+                message: ' purchase failed. No payment has been processed.',
                 error: hubnetData.message || 'Unknown error'
               });
             }
@@ -280,7 +280,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             
             return res.status(400).json({
               success: false,
-              message: 'Hubnet API connection error. No payment has been processed.',
+              message: ' connection error. No payment has been processed.',
               error: apiError.message,
               details: apiError.response?.data || 'Connection error'
             });
@@ -307,7 +307,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
         type: 'purchase',
         amount: price,
         currency: user.wallet.currency,
-        description: `API: Bundle purchase: ${capacity}MB for ${recipientNumber}`,
+        description: `API: Bundle purchase: ${capacity}GB for ${recipientNumber}`,
         status: 'completed',
         reference: 'API-TXN-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
         orderId: newOrder._id,
@@ -341,7 +341,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             price: price,
             status: newOrder.status,
             createdAt: newOrder.createdAt,
-            hubnetReference: newOrder.hubnetReference
+            // hubnetReference: newOrder.hubnetReference
           },
           transaction: {
             id: transaction._id,
