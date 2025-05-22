@@ -11,7 +11,7 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_live_a3c9c9eb
 const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
 // Transaction fee percentage (2%)
-const TRANSACTION_FEE_PERCENTAGE = 2;
+const TRANSACTION_FEE_PERCENTAGE = 2.5;
 
 /**
  * Initiates a deposit transaction via Paystack
