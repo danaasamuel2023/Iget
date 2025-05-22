@@ -1,9 +1,8 @@
-// paystackRoutes.js - Enhanced with robust double payment prevention
+// paystackRoutes.js - Updated with paginated transactions route
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const crypto = require('crypto');
-const mongoose = require('mongoose');
 const { Transaction, User } = require('../schema/schema');
 const authMiddleware = require('../AuthMiddle/middlewareauth');
 
@@ -11,221 +10,8 @@ const authMiddleware = require('../AuthMiddle/middlewareauth');
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_live_a3c9c9ebae098fe19f77e497977d7fb33c43dabd';
 const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
-// Transaction fee percentage (2.5%)
+// Transaction fee percentage (2%)
 const TRANSACTION_FEE_PERCENTAGE = 2.5;
-
-/**
- * Enhanced processSuccessfulPayment function with comprehensive double-payment prevention
- */
-async function processSuccessfulPayment(reference, source = 'unknown') {
-  const session = await mongoose.startSession();
-  
-  try {
-    // Start a database transaction to ensure atomicity
-    await session.startTransaction();
-    
-    // Use findOneAndUpdate with strict conditions to prevent race conditions
-    const transaction = await Transaction.findOneAndUpdate(
-      { 
-        reference, 
-        status: 'pending',
-        $or: [
-          { processing: { $exists: false } },
-          { processing: false },
-          { processing: null }
-        ]
-      },
-      { 
-        $set: { 
-          processing: true,
-          processingStartedAt: new Date(),
-          processingSource: source // Track which endpoint started processing
-        } 
-      },
-      { 
-        new: true,
-        session // Use the session for the transaction
-      }
-    );
-
-    if (!transaction) {
-      await session.abortTransaction();
-      console.log(`Transaction ${reference} not found, already processed, or currently being processed by another instance`);
-      
-      // Check if transaction exists and return appropriate response
-      const existingTransaction = await Transaction.findOne({ reference });
-      if (existingTransaction) {
-        if (existingTransaction.status === 'completed') {
-          return { 
-            success: true, 
-            message: 'Transaction already completed',
-            alreadyProcessed: true,
-            transaction: existingTransaction
-          };
-        }
-        return { 
-          success: false, 
-          message: 'Transaction is currently being processed by another instance',
-          isBeingProcessed: true
-        };
-      }
-      
-      return { success: false, message: 'Transaction not found' };
-    }
-
-    console.log(`Processing payment ${reference} from ${source}`);
-
-    // Find the user
-    const user = await User.findById(transaction.user).session(session);
-    if (!user) {
-      console.error(`User not found for transaction ${reference}`);
-      
-      // Clean up: reset processing flag
-      await Transaction.findByIdAndUpdate(
-        transaction._id,
-        { 
-          $unset: { 
-            processing: 1, 
-            processingStartedAt: 1, 
-            processingSource: 1 
-          } 
-        },
-        { session }
-      );
-      
-      await session.abortTransaction();
-      return { success: false, message: 'User not found' };
-    }
-
-    // Get the amount to credit (this should be the original amount without fee)
-    const creditAmount = transaction.amount;
-
-    // Verify the credit amount is positive
-    if (creditAmount <= 0) {
-      console.error(`Invalid credit amount for transaction ${reference}: ${creditAmount}`);
-      
-      // Clean up: reset processing flag
-      await Transaction.findByIdAndUpdate(
-        transaction._id,
-        { 
-          $unset: { 
-            processing: 1, 
-            processingStartedAt: 1, 
-            processingSource: 1 
-          } 
-        },
-        { session }
-      );
-      
-      await session.abortTransaction();
-      return { success: false, message: 'Invalid transaction amount' };
-    }
-
-    // Record the balance before update
-    const balanceBefore = user.wallet.balance;
-
-    // Update transaction details
-    const updatedTransaction = await Transaction.findByIdAndUpdate(
-      transaction._id,
-      {
-        status: 'completed',
-        balanceBefore: balanceBefore,
-        balanceAfter: balanceBefore + creditAmount,
-        completedAt: new Date(),
-        processedBy: source,
-        $unset: { 
-          processing: 1, 
-          processingStartedAt: 1, 
-          processingSource: 1 
-        }
-      },
-      { new: true, session }
-    );
-    
-    // Update user wallet balance and add transaction reference
-    const updatedUser = await User.findByIdAndUpdate(
-      user._id,
-      {
-        $inc: { 'wallet.balance': creditAmount },
-        $addToSet: { 'wallet.transactions': transaction._id } // Use $addToSet to prevent duplicates
-      },
-      { new: true, session }
-    );
-
-    // Commit the transaction
-    await session.commitTransaction();
-    
-    console.log(`Payment ${reference} processed successfully. User balance: ${balanceBefore} -> ${updatedUser.wallet.balance}`);
-    
-    return { 
-      success: true, 
-      message: 'Payment processed successfully',
-      transaction: updatedTransaction,
-      previousBalance: balanceBefore,
-      newBalance: updatedUser.wallet.balance,
-      creditAmount: creditAmount
-    };
-    
-  } catch (error) {
-    // If there's an error, abort the transaction
-    await session.abortTransaction();
-    
-    console.error(`Error processing payment ${reference}:`, error);
-    
-    // Try to clean up the processing flag (best effort)
-    try {
-      await Transaction.findOneAndUpdate(
-        { reference },
-        { 
-          $unset: { 
-            processing: 1, 
-            processingStartedAt: 1, 
-            processingSource: 1 
-          } 
-        }
-      );
-    } catch (cleanupError) {
-      console.error(`Failed to cleanup processing flag for ${reference}:`, cleanupError);
-    }
-    
-    throw error;
-  } finally {
-    await session.endSession();
-  }
-}
-
-/**
- * Cleanup function to reset stuck processing transactions
- */
-const cleanupStuckTransactions = async () => {
-  try {
-    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
-    
-    const result = await Transaction.updateMany(
-      {
-        processing: true,
-        processingStartedAt: { $lt: thirtyMinutesAgo },
-        status: 'pending'
-      },
-      {
-        $unset: {
-          processing: 1,
-          processingStartedAt: 1,
-          processingSource: 1
-        }
-      }
-    );
-    
-    if (result.modifiedCount > 0) {
-      console.log(`Cleaned up ${result.modifiedCount} stuck processing transactions`);
-    }
-    
-    return result;
-  } catch (error) {
-    console.error('Error cleaning up stuck transactions:', error);
-    throw error;
-  }
-};
 
 /**
  * Initiates a deposit transaction via Paystack
@@ -259,7 +45,7 @@ const initiateDeposit = async (req, res) => {
       });
     }
 
-    // Calculate transaction fee (2.5% of the amount)
+    // Calculate transaction fee (2% of the amount)
     const feePercentage = TRANSACTION_FEE_PERCENTAGE / 100;
     const transactionFee = Math.round(amount * feePercentage);
     
@@ -300,7 +86,7 @@ const initiateDeposit = async (req, res) => {
         email: email,
         amount: totalAmount, // Total amount in kobo (pesewas) including fee
         reference: reference,
-        callback_url: `https://console.igetghana.com/verify?reference=${reference}`,
+        callback_url: `https://console.igetghana.com//verify?reference=${reference}`,
         metadata: {
           userId: user._id.toString(),
           transactionId: transaction._id.toString(),
@@ -340,7 +126,7 @@ const initiateDeposit = async (req, res) => {
 };
 
 /**
- * Enhanced verification function with additional safety checks
+ * Verifies a Paystack transaction
  */
 const verifyTransaction = async (req, res) => {
   try {
@@ -353,154 +139,98 @@ const verifyTransaction = async (req, res) => {
       });
     }
 
-    // First, check if we already have this transaction and its current status
-    const existingTransaction = await Transaction.findOne({ reference });
-    
-    if (!existingTransaction) {
+    // Verify the transaction with Paystack
+    const response = await axios.get(
+      `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
+      {
+        headers: {
+          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        }
+      }
+    );
+
+    const { status, data } = response.data;
+
+    if (!status || data.status !== 'success') {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed',
+        data: response.data
+      });
+    }
+
+    // Get the metadata from Paystack response
+    const { userId, transactionId, originalAmount } = data.metadata;
+
+    // Find the transaction in our database
+    const transaction = await Transaction.findOne({
+      _id: transactionId,
+      reference: reference
+    });
+
+    if (!transaction) {
       return res.status(404).json({
         success: false,
         message: 'Transaction not found'
       });
     }
 
-    // If already completed, return success immediately
-    if (existingTransaction.status === 'completed') {
-      const user = await User.findById(existingTransaction.user);
-      
-      // Redirect or respond based on context
-      if (req.headers['accept'] && req.headers['accept'].includes('text/html')) {
-        return res.redirect(`https://www.datamartgh.shop/payment/success?reference=${reference}`);
-      } else {
-        return res.status(200).json({
-          success: true,
-          message: 'Transaction already processed',
-          data: {
-            transaction: existingTransaction,
-            newBalance: user ? user.wallet.balance : null,
-            amountCredited: existingTransaction.amount,
-            alreadyProcessed: true
-          }
-        });
-      }
-    }
-
-    // If currently being processed, wait a moment and check again
-    if (existingTransaction.processing) {
-      const processingStartTime = existingTransaction.processingStartedAt;
-      const now = new Date();
-      const processingDuration = now - processingStartTime;
-      
-      // If processing for more than 30 seconds, assume it's stuck and allow retry
-      if (processingDuration > 30000) {
-        console.warn(`Transaction ${reference} has been processing for ${processingDuration}ms, allowing retry`);
-      } else {
-        return res.status(202).json({
-          success: false,
-          message: 'Transaction is currently being processed. Please wait.',
-          isBeingProcessed: true,
-          processingDuration: processingDuration
-        });
-      }
-    }
-
-    // Only verify with Paystack if transaction is pending
-    if (existingTransaction.status === 'pending') {
-      // Verify the transaction with Paystack
-      const response = await axios.get(
-        `${PAYSTACK_BASE_URL}/transaction/verify/${reference}`,
-        {
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          },
-          timeout: 10000 // 10 second timeout
-        }
-      );
-
-      const { status, data } = response.data;
-
-      if (!status || data.status !== 'success') {
-        return res.status(400).json({
-          success: false,
-          message: 'Payment verification failed or payment not successful',
-          paystackStatus: data.status,
-          data: response.data
-        });
-      }
-
-      // Process the successful payment
-      const result = await processSuccessfulPayment(reference, 'verification_endpoint');
-      
-      if (result.success) {
-        // Update transaction with Paystack data
-        await Transaction.findByIdAndUpdate(
-          existingTransaction._id,
-          {
-            $set: {
-              'paymentDetails.paystack': data,
-              updatedAt: new Date()
-            }
-          }
-        );
-
-        // Redirect or respond based on context
-        if (req.headers['accept'] && req.headers['accept'].includes('text/html')) {
-          return res.redirect(`https://console.igetghana.com/payment/success?reference=${reference}`);
-        } else {
-          return res.status(200).json({
-            success: true,
-            message: 'Payment verified and wallet updated successfully',
-            data: {
-              transaction: result.transaction,
-              newBalance: result.newBalance,
-              amountCredited: result.creditAmount,
-              previousBalance: result.previousBalance
-            }
-          });
-        }
-      } else if (result.alreadyProcessed) {
-        // Redirect or respond based on context
-        if (req.headers['accept'] && req.headers['accept'].includes('text/html')) {
-          return res.redirect(`https://www.datamartgh.shop/payment/success?reference=${reference}`);
-        } else {
-          return res.status(200).json({
-            success: true,
-            message: 'Payment already processed',
-            data: {
-              transaction: result.transaction,
-              alreadyProcessed: true
-            }
-          });
-        }
-      } else {
-        return res.status(400).json({
-          success: false,
-          message: result.message
-        });
-      }
-    }
-
-    // For any other status
-    return res.status(400).json({
-      success: false,
-      message: `Transaction status: ${existingTransaction.status}`,
-      data: {
-        reference,
-        status: existingTransaction.status
-      }
-    });
-
-  } catch (error) {
-    console.error('Paystack verification error:', error);
-    
-    // Provide more specific error messages
-    if (error.code === 'ECONNABORTED') {
-      return res.status(408).json({
-        success: false,
-        message: 'Payment verification timeout. Please try again.',
-        error: 'timeout'
+    // If the transaction is already completed, prevent double processing
+    if (transaction.status === 'completed') {
+      return res.status(200).json({
+        success: true,
+        message: 'Transaction already processed',
+        data: transaction
       });
     }
+
+    // Find the user
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Get the amount to credit to user's wallet (original amount without fee)
+    const creditAmount = originalAmount ? originalAmount / 100 : data.amount / 100;
     
+    // Update transaction details
+    transaction.status = 'completed';
+    transaction.balanceBefore = user.wallet.balance;
+    transaction.balanceAfter = user.wallet.balance + creditAmount;
+    transaction.paymentDetails = {
+      ...transaction.paymentDetails,
+      paystack: data
+    };
+    transaction.updatedAt = Date.now();
+
+    // Update user wallet balance with only the original amount (not including fee)
+    user.wallet.balance += creditAmount;
+    user.wallet.transactions.push(transaction._id);
+
+    // Save both documents
+    await Promise.all([transaction.save(), user.save()]);
+
+    // Redirect or respond based on context
+    if (req.headers['accept'] && req.headers['accept'].includes('text/html')) {
+      // Redirect to a success page if accessed via browser
+      return res.redirect(`https://www.datamartgh.shop/payment/success?reference=${reference}`);
+    } else {
+      // Return JSON if API call
+      return res.status(200).json({
+        success: true,
+        message: 'Payment verified and wallet updated successfully',
+        data: {
+          transaction: transaction,
+          newBalance: user.wallet.balance,
+          amountCredited: creditAmount,
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Paystack verification error:', error);
     return res.status(500).json({
       success: false,
       message: 'Failed to verify payment',
@@ -510,7 +240,7 @@ const verifyTransaction = async (req, res) => {
 };
 
 /**
- * Enhanced webhook handler with better duplicate prevention
+ * Handles Paystack webhook events
  */
 const handleWebhook = async (req, res) => {
   try {
@@ -521,208 +251,120 @@ const handleWebhook = async (req, res) => {
       .digest('hex');
     
     if (hash !== req.headers['x-paystack-signature']) {
-      console.warn('Invalid webhook signature received');
       return res.status(401).json({ success: false, message: 'Invalid signature' });
     }
     
     const event = req.body;
-    console.log(`Received webhook event: ${event.event} for reference: ${event.data?.reference}`);
     
     // Handle charge.success event
     if (event.event === 'charge.success') {
       const { reference } = event.data;
       
-      if (!reference) {
-        console.warn('Webhook received without reference');
-        return res.status(200).send('Webhook received but no reference found');
+      // Find the corresponding transaction
+      const transaction = await Transaction.findOne({ reference });
+      if (!transaction) {
+        return res.status(200).send('Transaction not found, but webhook received');
       }
       
-      // Process the payment
-      const result = await processSuccessfulPayment(reference, 'webhook');
-      
-      if (result.success) {
-        // Update transaction with webhook data if it was just processed
-        if (!result.alreadyProcessed) {
-          await Transaction.findOneAndUpdate(
-            { reference },
-            {
-              $set: {
-                'paymentDetails.webhook': event.data,
-                webhookReceivedAt: new Date()
-              }
-            }
-          );
-        }
-        
-        console.log(`Webhook processed successfully for ${reference}`);
-      } else {
-        console.log(`Webhook processing result for ${reference}:`, result.message);
+      // If transaction is already completed, do nothing
+      if (transaction.status === 'completed') {
+        return res.status(200).send('Transaction already processed');
       }
+      
+      // Find the user
+      const user = await User.findById(transaction.user);
+      if (!user) {
+        return res.status(200).send('User not found, but webhook received');
+      }
+      
+      // Get the original amount (without fee) from metadata or use transaction amount
+      const originalAmount = event.data.metadata && event.data.metadata.originalAmount 
+        ? event.data.metadata.originalAmount / 100 
+        : transaction.amount;
+      
+      // Update transaction details
+      transaction.status = 'completed';
+      transaction.balanceBefore = user.wallet.balance;
+      transaction.balanceAfter = user.wallet.balance + originalAmount;
+      transaction.paymentDetails = {
+        ...transaction.paymentDetails,
+        paystack: event.data
+      };
+      transaction.updatedAt = Date.now();
+      
+      // Update user wallet balance with original amount (not including fee)
+      user.wallet.balance += originalAmount;
+      user.wallet.transactions.push(transaction._id);
+      
+      // Save both documents
+      await Promise.all([transaction.save(), user.save()]);
     }
     
-    // Always acknowledge receipt of the webhook
+    // Acknowledge receipt of the webhook
     return res.status(200).send('Webhook received');
-    
   } catch (error) {
     console.error('Paystack webhook error:', error);
-    // Still acknowledge the webhook to prevent retries for processing errors
-    return res.status(200).send('Webhook received with processing error');
+    return res.status(500).send('Webhook processing failed');
   }
 };
 
-/**
- * Additional verify-payment endpoint with enhanced safety
- */
-const verifyPaymentEndpoint = async (req, res) => {
+// Adding the transaction locking mechanism from the second implementation
+async function processSuccessfulPayment(reference) {
+  // Use findOneAndUpdate with proper conditions to prevent race conditions
+  const transaction = await Transaction.findOneAndUpdate(
+    { 
+      reference, 
+      status: 'pending',
+      processing: { $ne: true } // Only update if not already being processed
+    },
+    { 
+      $set: { 
+        processing: true  // Mark as being processed to prevent double processing
+      } 
+    },
+    { new: true }
+  );
+
+  if (!transaction) {
+    console.log(`Transaction ${reference} not found or already processed/processing`);
+    return { success: false, message: 'Transaction not found or already processed' };
+  }
+
   try {
-    const { reference } = req.query;
-
-    if (!reference) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Reference is required' 
-      });
+    // Find the user
+    const user = await User.findById(transaction.user);
+    if (!user) {
+      console.error(`User not found for transaction ${reference}`);
+      // Release the processing lock
+      transaction.processing = false;
+      await transaction.save();
+      return { success: false, message: 'User not found' };
     }
 
-    // Find the transaction in our database
-    const transaction = await Transaction.findOne({ reference });
+    // Get the amount to credit (this should be the original amount without fee)
+    const creditAmount = transaction.amount;
 
-    if (!transaction) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Transaction not found' 
-      });
-    }
-
-    // If transaction is already completed, we can return success
-    if (transaction.status === 'completed') {
-      return res.json({
-        success: true,
-        message: 'Payment already verified and completed',
-        data: {
-          reference,
-          amount: transaction.amount,
-          status: transaction.status
-        }
-      });
-    }
-
-    // If currently being processed
-    if (transaction.processing) {
-      const processingStartTime = transaction.processingStartedAt;
-      const now = new Date();
-      const processingDuration = now - processingStartTime;
-      
-      // If processing for more than 30 seconds, assume it's stuck and allow retry
-      if (processingDuration <= 30000) {
-        return res.status(202).json({
-          success: false,
-          message: 'Transaction is currently being processed. Please wait.',
-          isBeingProcessed: true,
-          processingDuration: processingDuration
-        });
-      }
-    }
-
-    // If transaction is still pending, verify with Paystack
-    if (transaction.status === 'pending') {
-      try {
-        // Verify the transaction status with Paystack
-        const paystackResponse = await axios.get(
-          `${PAYSTACK_BASE_URL}/transaction/verify/${transaction.reference}`,
-          {
-            headers: {
-              Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-              'Content-Type': 'application/json'
-            },
-            timeout: 10000
-          }
-        );
-
-        const { data } = paystackResponse.data;
-
-        // If payment is successful
-        if (data.status === 'success') {
-          // Process the payment using our common function
-          const result = await processSuccessfulPayment(reference, 'verify_payment_endpoint');
-          
-          if (result.success) {
-            return res.json({
-              success: true,
-              message: 'Payment verified successfully',
-              data: {
-                reference,
-                amount: transaction.amount,
-                status: 'completed'
-              }
-            });
-          } else if (result.alreadyProcessed) {
-            return res.json({
-              success: true,
-              message: 'Payment already verified and completed',
-              data: {
-                reference,
-                amount: transaction.amount,
-                status: 'completed'
-              }
-            });
-          } else {
-            return res.json({
-              success: false,
-              message: result.message,
-              data: {
-                reference,
-                amount: transaction.amount,
-                status: transaction.status
-              }
-            });
-          }
-        } else {
-          return res.json({
-            success: false,
-            message: 'Payment not completed',
-            data: {
-              reference,
-              amount: transaction.amount,
-              status: data.status
-            }
-          });
-        }
-      } catch (error) {
-        console.error('Paystack verification error:', error);
-        
-        if (error.code === 'ECONNABORTED') {
-          return res.status(408).json({
-            success: false,
-            error: 'Payment verification timeout. Please try again.'
-          });
-        }
-        
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to verify payment with Paystack'
-        });
-      }
-    }
-
-    // For failed or other statuses
-    return res.json({
-      success: false,
-      message: `Payment status: ${transaction.status}`,
-      data: {
-        reference,
-        amount: transaction.amount,
-        status: transaction.status
-      }
-    });
+    // Update transaction details
+    transaction.status = 'completed';
+    transaction.balanceBefore = user.wallet.balance;
+    transaction.balanceAfter = user.wallet.balance + creditAmount;
+    transaction.updatedAt = Date.now();
+    
+    // Update user wallet balance
+    user.wallet.balance += creditAmount;
+    user.wallet.transactions.push(transaction._id);
+    
+    // Save both documents
+    await Promise.all([transaction.save(), user.save()]);
+    
+    return { success: true, message: 'Deposit successful' };
   } catch (error) {
-    console.error('Verification Error:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    });
+    // If there's an error, release the processing lock
+    transaction.processing = false;
+    await transaction.save();
+    throw error;
   }
-};
+}
 
 /**
  * Fetches paginated transactions for a user and verifies pending transactions
@@ -754,14 +396,16 @@ const getUserTransactionsAndVerifyPending = async (req, res) => {
     const pendingTransactions = await Transaction.find({ 
       user: userId, 
       status: 'pending', 
-      type: 'deposit',
-      processing: { $ne: true } // Skip already processing transactions
+      type: 'deposit'
     });
     
     if (pendingTransactions.length > 0) {
       // Verify each pending transaction with Paystack
       for (const transaction of pendingTransactions) {
         try {
+          // Skip if already being processed
+          if (transaction.processing) continue;
+          
           // Verify the transaction with Paystack
           const paystackResponse = await axios.get(
             `${PAYSTACK_BASE_URL}/transaction/verify/${transaction.reference}`,
@@ -769,8 +413,7 @@ const getUserTransactionsAndVerifyPending = async (req, res) => {
               headers: {
                 Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
                 'Content-Type': 'application/json'
-              },
-              timeout: 10000
+              }
             }
           );
           
@@ -778,8 +421,8 @@ const getUserTransactionsAndVerifyPending = async (req, res) => {
           
           // If payment was successful, process it
           if (data.status === 'success') {
-            const result = await processSuccessfulPayment(transaction.reference, 'user_transactions_endpoint');
-            if (result.success && !result.alreadyProcessed) {
+            const result = await processSuccessfulPayment(transaction.reference);
+            if (result.success) {
               verifiedTransactions.push({
                 transactionId: transaction._id,
                 reference: transaction.reference,
@@ -912,8 +555,7 @@ const verifyAllPendingTransactions = async (req, res) => {
             headers: {
               Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
               'Content-Type': 'application/json'
-            },
-            timeout: 10000
+            }
           }
         );
         
@@ -921,23 +563,15 @@ const verifyAllPendingTransactions = async (req, res) => {
         
         // If successful, process payment
         if (data.status === 'success') {
-          const result = await processSuccessfulPayment(transaction.reference, 'admin_verify_all');
+          const result = await processSuccessfulPayment(transaction.reference);
           
           if (result.success) {
-            if (!result.alreadyProcessed) {
-              results.verified++;
-              results.details.push({
-                reference: transaction.reference,
-                status: 'completed',
-                message: 'Successfully verified and processed'
-              });
-            } else {
-              results.details.push({
-                reference: transaction.reference,
-                status: 'already_completed',
-                message: 'Transaction was already completed'
-              });
-            }
+            results.verified++;
+            results.details.push({
+              reference: transaction.reference,
+              status: 'completed',
+              message: 'Successfully verified and processed'
+            });
           } else {
             results.failed++;
             results.details.push({
@@ -1015,37 +649,124 @@ router.get('/verify', verifyTransaction);
 // Webhook endpoint - receives Paystack event notifications
 router.post('/webhook', handleWebhook);
 
-// Additional verify-payment endpoint
-router.get('/verify-payment', verifyPaymentEndpoint);
+// Additional verify-payment endpoint from the second implementation
+router.get('/verify-payment', async (req, res) => {
+  try {
+    const { reference } = req.query;
+
+    if (!reference) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Reference is required' 
+      });
+    }
+
+    // Find the transaction in our database
+    const transaction = await Transaction.findOne({ reference });
+
+    if (!transaction) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Transaction not found' 
+      });
+    }
+
+    // If transaction is already completed, we can return success
+    if (transaction.status === 'completed') {
+      return res.json({
+        success: true,
+        message: 'Payment already verified and completed',
+        data: {
+          reference,
+          amount: transaction.amount,
+          status: transaction.status
+        }
+      });
+    }
+
+    // If transaction is still pending, verify with Paystack
+    if (transaction.status === 'pending') {
+      try {
+        // Verify the transaction status with Paystack
+        const paystackResponse = await axios.get(
+          `${PAYSTACK_BASE_URL}/transaction/verify/${transaction.reference}`,
+          {
+            headers: {
+              Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        const { data } = paystackResponse.data;
+
+        // If payment is successful
+        if (data.status === 'success') {
+          // Process the payment using our common function
+          const result = await processSuccessfulPayment(reference);
+          
+          if (result.success) {
+            return res.json({
+              success: true,
+              message: 'Payment verified successfully',
+              data: {
+                reference,
+                amount: transaction.amount,
+                status: 'completed'
+              }
+            });
+          } else {
+            return res.json({
+              success: false,
+              message: result.message,
+              data: {
+                reference,
+                amount: transaction.amount,
+                status: transaction.status
+              }
+            });
+          }
+        } else {
+          return res.json({
+            success: false,
+            message: 'Payment not completed',
+            data: {
+              reference,
+              amount: transaction.amount,
+              status: data.status
+            }
+          });
+        }
+      } catch (error) {
+        console.error('Paystack verification error:', error);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to verify payment with Paystack'
+        });
+      }
+    }
+
+    // For failed or other statuses
+    return res.json({
+      success: false,
+      message: `Payment status: ${transaction.status}`,
+      data: {
+        reference,
+        amount: transaction.amount,
+        status: transaction.status
+      }
+    });
+  } catch (error) {
+    console.error('Verification Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
 
 // Routes for user transactions and verifying pending transactions
 router.get('/transactions', authMiddleware, getUserTransactionsAndVerifyPending);
 router.get('/verify-all-pending', authMiddleware, verifyAllPendingTransactions);
-
-// Admin cleanup endpoint for stuck transactions
-router.post('/cleanup-stuck', authMiddleware, async (req, res) => {
-  try {
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin privileges required' 
-      });
-    }
-    
-    const result = await cleanupStuckTransactions();
-    
-    return res.status(200).json({
-      success: true,
-      message: `Cleaned up ${result.modifiedCount} stuck transactions`,
-      data: result
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to cleanup stuck transactions',
-      error: error.message
-    });
-  }
-});
 
 module.exports = router;
