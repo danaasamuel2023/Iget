@@ -551,26 +551,32 @@ router.put('/:id/status', adminAuth, async (req, res) => {
             }
           } 
           else if (status === 'failed' || status === 'refunded') {
-            // Send refund SMS to the user who placed the order
-            
-            // Convert MB to GB for display if necessary
-            const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-            
-            const refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
-            
-            // Use the imported sendSMS function from the top of the file
-            const smsResult = await sendSMS(userPhone, refundMessage, {
-              useCase: 'transactional',
-              senderID: senderID
-            });
-            
-            if (smsResult.success) {
-              console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} with senderID: ${senderID}`);
-            } else {
-              console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
-            }
-          }
-        } else {
+  // Send refund SMS to the user who placed the order
+  
+  let refundMessage = '';
+  
+  // Handle AFA-registration bundle type differently
+  if (order.bundleType && order.bundleType.toLowerCase() === 'afa-registration') {
+    refundMessage = `Your AFA registration has been cancelled. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+  } else {
+    // For other bundle types, include capacity information
+    // Convert MB to GB for display if necessary
+    const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+    refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+  }
+  
+  // Use the imported sendSMS function from the top of the file
+  const smsResult = await sendSMS(userPhone, refundMessage, {
+    useCase: 'transactional',
+    senderID: senderID
+  });
+  
+  if (smsResult.success) {
+    console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} (${order.bundleType}) with senderID: ${senderID}`);
+  } else {
+    console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
+  }
+}     } else {
           console.error(`User not found or phone number missing for order ${order._id}`);
         }
       } catch (smsError) {
