@@ -492,65 +492,50 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     order.updatedAt = Date.now();
     
     // Set completed date if status is now completed
-    if (status === 'completed' && previousStatus !== 'completed') {
-      order.completedAt = new Date();
+   // Updated completion and refund SMS sections for the PUT /:id/status route
+// Replace the existing SMS notification logic with this code:
+
+if (status === 'completed' && previousStatus !== 'completed') {
+  // Determine which SMS template to use based on bundleType
+  let completionMessage = '';
+  
+  // Handle AFA-registration bundle type differently
+  if (order.bundleType && order.bundleType.toLowerCase() === 'afa-registration') {
+    completionMessage = `Your MTN AFA registration for ${order.recipientNumber} has been completed successfully. You can now enjoy MTN AFA services.\niGet`;
+  } else {
+    // For other bundle types, include capacity information
+    switch(order.bundleType.toLowerCase()) {
+      case 'mtnup2u':
+        // Convert MB to GB for display if necessary
+        const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+        completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
+        break;
+      case 'telecel-5959':
+        // Convert MB to GB for display if necessary
+        const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+        completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
+        break;
+      default:
+        // Convert MB to GB for display if necessary
+        const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+        completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
+        break;
     }
-    
-    // Set failure reason if provided
-    if ((status === 'failed' || status === 'refunded') && req.body.failureReason) {
-      order.failureReason = req.body.failureReason;
-    }
-    
-    await order.save();
-    
-    // Send SMS notifications based on status change only if sendSMSNotification is true
-    if (sendSMSNotification) {
-      try {
-        // Format phone number for SMS - remove the '+' prefix
-        const formatPhoneForSms = (phone) => {
-          // Remove the '+' if it exists
-          return phone.replace(/^\+233/, '');
-        };
-        
-        // Get the user's phone who placed the order
-        if (order.user && order.user.phone) {
-          const userPhone = formatPhoneForSms(order.user.phone);
-          
-          if (status === 'completed' && previousStatus !== 'completed') {
-            // Determine which SMS template to use based on bundleType
-            let completionMessage = '';
-            
-            switch(order.bundleType.toLowerCase()) {
-              case 'mtnup2u':
-                // Convert MB to GB for display if necessary
-                const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-                completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
-                break;
-              case 'telecel-5959':
-                // Convert MB to GB for display if necessary
-                const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-                completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
-                break;
-              default:
-                // Convert MB to GB for display if necessary
-                const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-                completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
-                break;
-            }
-            
-            // Use the imported sendSMS function from the top of the file
-            const smsResult = await sendSMS(userPhone, completionMessage, {
-              useCase: 'transactional',
-              senderID: senderID
-            });
-            
-            if (smsResult.success) {
-              console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
-            } else {
-              console.error(`Failed to send completion SMS: ${smsResult.error?.message || 'Unknown error'}`);
-            }
-          } 
-          else if (status === 'failed' || status === 'refunded') {
+  }
+  
+  // Use the imported sendSMS function from the top of the file
+  const smsResult = await sendSMS(userPhone, completionMessage, {
+    useCase: 'transactional',
+    senderID: senderID
+  });
+  
+  if (smsResult.success) {
+    console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} (${order.bundleType}) with senderID: ${senderID}`);
+  } else {
+    console.error(`Failed to send completion SMS: ${smsResult.error?.message || 'Unknown error'}`);
+  }
+} 
+else if (status === 'failed' || status === 'refunded') {
   // Send refund SMS to the user who placed the order
   
   let refundMessage = '';
@@ -576,14 +561,7 @@ router.put('/:id/status', adminAuth, async (req, res) => {
   } else {
     console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
   }
-}     } else {
-          console.error(`User not found or phone number missing for order ${order._id}`);
-        }
-      } catch (smsError) {
-        // Log SMS error but continue with response
-        console.error('Failed to send status update SMS:', smsError.message);
-      }
-    } else {
+}else {
       console.log(`SMS notification skipped for order ${order._id} status update to ${status} (sendSMSNotification=${sendSMSNotification})`);
     }
     
