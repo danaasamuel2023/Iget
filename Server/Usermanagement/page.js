@@ -1,18 +1,182 @@
 const express = require('express');
 const router = express.Router();
-const { User, Transaction } = require('../schema/schema');
+const { User, Transaction, ApiLog } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth'); 
-const adminAuth = require('../adminMiddlware/middleware'); 
 
-// GET all users (admin only)
+// Enhanced admin middleware with role-based permissions and proper error handling
+const adminAuth = async (req, res, next) => {
+  try {
+    // Check if auth middleware properly set req.user
+    if (!req.user || !req.user._id) {
+      console.error('AdminAuth: req.user is missing or invalid:', req.user);
+  return res.status(401).json({
+    success: false,
+    message: 'Authentication required - user not found'
+  });
+}
+
+// Fetch fresh user data from database to ensure we have current role
+const user = await User.findById(req.user._id || req.user.id).select('username email role isActive');
+
+if (!user) {
+  console.error('AdminAuth: User not found in database:', req.user._id || req.user.id);
+  return res.status(401).json({
+    success: false,
+    message: 'User not found'
+  });
+}
+
+    if (!user.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: 'User account is deactivated'
+      });
+    }
+
+    // Check if user has any admin role
+    const allowedRoles = ['admin', 'credit_admin', 'debit_admin'];
+    if (!allowedRoles.includes(user.role)) {
+      console.error('AdminAuth: User does not have admin role:', user.role);
+      return res.status(403).json({
+        success: false,
+        message: 'Admin privileges required'
+      });
+    }
+
+    // Update req.user with fresh data
+    req.user = user;
+    next();
+  } catch (error) {
+    console.error('Admin auth middleware error:', error);
+    res.status(401).json({
+      success: false,
+      message: 'Admin authorization failed',
+      error: error.message
+    });
+  }
+};
+
+// Specific role checking middleware
+const requireFullAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Full admin privileges required for this action'
+    });
+  }
+  next();
+};
+
+const requireCreditAdmin = (req, res, next) => {
+  if (!req.user || !['admin', 'credit_admin'].includes(req.user.role)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Credit admin privileges required for this action'
+    });
+  }
+  next();
+};
+
+const requireDebitAdmin = (req, res, next) => {
+  if (!req.user || !['admin', 'debit_admin'].includes(req.user.role)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Debit admin privileges required for this action'
+    });
+  }
+  next();
+};
+
+// Helper function to log admin actions
+const logAdminAction = async (adminId, action, targetUserId = null, details = {}) => {
+  try {
+    await ApiLog.create({
+      user: adminId,
+      endpoint: `/admin/${action}`,
+      method: 'POST',
+      requestData: {
+        action,
+        targetUser: targetUserId,
+        details
+      },
+      responseData: { success: true },
+      ipAddress: details.ipAddress || 'unknown',
+      status: 200,
+      executionTime: Date.now()
+    });
+  } catch (error) {
+    console.error('Failed to log admin action:', error);
+  }
+};
+
+// GET current admin permissions (available to all admin types)
+router.get('/my-permissions', auth, adminAuth, async (req, res) => {
+    try {
+        // req.user should already be populated by adminAuth middleware
+        if (!req.user) {
+            return res.status(401).json({
+                success: false,
+                message: 'User authentication failed'
+            });
+        }
+
+        const admin = req.user; // Already fetched in adminAuth middleware
+        
+        const permissions = {
+            role: admin.role,
+            canViewAllUsers: true, // All admin types can now view users (but with different data)
+            canViewUsersForWallet: true, // New permission for wallet operations
+            canViewAllTransactions: admin.role === 'admin',
+            canCredit: ['admin', 'credit_admin'].includes(admin.role),
+            canDebit: ['admin', 'debit_admin'].includes(admin.role),
+            canChangeRoles: admin.role === 'admin',
+            canDeleteUsers: admin.role === 'admin',
+            canChangeUserStatus: admin.role === 'admin',
+            canViewAdminLogs: admin.role === 'admin',
+            canRewardUsers: admin.role === 'admin',
+            // New detailed permissions
+            hasFullUserAccess: admin.role === 'admin',
+            hasLimitedUserAccess: ['credit_admin', 'debit_admin'].includes(admin.role)
+        };
+        
+        res.status(200).json({
+            success: true,
+            admin: {
+                id: admin._id,
+                username: admin.username,
+                email: admin.email,
+                role: admin.role
+            },
+            permissions,
+            roleDescription: {
+                admin: 'Full administrative access to all features',
+                credit_admin: 'Can view users and credit user wallets only',
+                debit_admin: 'Can view users and debit user wallets only'
+            }[admin.role]
+        });
+    } catch (error) {
+        console.error('Error fetching admin permissions:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while fetching permissions',
+            error: error.message
+        });
+    }
+});
+
+// GET all users (ALL ADMIN TYPES - but with different data based on role)
 router.get('/users', auth, adminAuth, async (req, res) => {
     try {
-        // Add pagination support
+        // Log admin action
+        await logAdminAction(req.user._id, 'view_users', null, { 
+          ipAddress: req.ip,
+          queryParams: req.query 
+        });
+
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
         
-        // Add filtering options
         const filter = {};
         
         if (req.query.role) {
@@ -23,7 +187,6 @@ router.get('/users', auth, adminAuth, async (req, res) => {
             filter.isActive = req.query.isActive === 'true';
         }
         
-        // Support search by username or email
         if (req.query.search) {
             filter.$or = [
                 { username: { $regex: req.query.search, $options: 'i' } },
@@ -31,31 +194,71 @@ router.get('/users', auth, adminAuth, async (req, res) => {
             ];
         }
         
-        // Count total documents for pagination metadata
         const total = await User.countDocuments(filter);
         
-        // Fetch users with pagination and filtering
-        const users = await User.find(filter)
-            .select('-password -apiKey')  // Exclude sensitive fields
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
+        // Different data selection based on admin role
+        let selectFields = '-password'; // Always exclude password
+        let responseData = {};
         
-        // Add pagination metadata
-        const totalPages = Math.ceil(total / limit);
+        if (req.user.role === 'admin') {
+            // Full admin gets all user data
+            selectFields = '-password -apiKey';
+            const users = await User.find(filter)
+                .select(selectFields)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit);
+            
+            responseData = {
+                success: true,
+                data: users,
+                pagination: {
+                    total,
+                    page,
+                    limit,
+                    totalPages: Math.ceil(total / limit),
+                    hasNextPage: page < Math.ceil(total / limit),
+                    hasPrevPage: page > 1
+                },
+                accessedBy: {
+                    adminId: req.user._id,
+                    adminUsername: req.user.username,
+                    adminRole: req.user.role,
+                    timestamp: new Date()
+                }
+            };
+        } else {
+            // Credit/Debit admins get limited user data - only what they need for wallet operations
+            selectFields = 'username email wallet role isActive createdAt';
+            const users = await User.find(filter)
+                .select(selectFields)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit);
+            
+            responseData = {
+                success: true,
+                data: users,
+                pagination: {
+                    total,
+                    page,
+                    limit,
+                    totalPages: Math.ceil(total / limit),
+                    hasNextPage: page < Math.ceil(total / limit),
+                    hasPrevPage: page > 1
+                },
+                accessedBy: {
+                    adminId: req.user._id,
+                    adminUsername: req.user.username,
+                    adminRole: req.user.role,
+                    timestamp: new Date()
+                },
+                limitedAccess: true,
+                note: `Limited user data for ${req.user.role} role`
+            };
+        }
         
-        res.status(200).json({
-            success: true,
-            data: users,
-            pagination: {
-                total,
-                page,
-                limit,
-                totalPages,
-                hasNextPage: page < totalPages,
-                hasPrevPage: page > 1
-            }
-        });
+        res.status(200).json(responseData);
     } catch (error) {
         console.error('Error fetching users:', error);
         
@@ -67,12 +270,15 @@ router.get('/users', auth, adminAuth, async (req, res) => {
     }
 });
 
-// GET user's transaction history (admin only)
-router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
+// GET user's transaction history (FULL ADMIN ONLY)
+router.get('/users/:userId/transactions', auth, adminAuth, requireFullAdmin, async (req, res) => {
     try {
         const userId = req.params.userId;
         
-        // Verify user exists
+        await logAdminAction(req.user._id, 'view_user_transactions', userId, { 
+          ipAddress: req.ip 
+        });
+        
         const user = await User.findById(userId);
         if (!user) {
             return res.status(404).json({
@@ -81,12 +287,10 @@ router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
             });
         }
         
-        // Add pagination support
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
         const skip = (page - 1) * limit;
         
-        // Add filtering options
         const filter = { user: userId };
         
         if (req.query.type) {
@@ -100,14 +304,12 @@ router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
             };
         }
         
-        // Count total transactions for pagination metadata
         const total = await Transaction.countDocuments(filter);
         
-        // Fetch transactions with admin details
         const transactions = await Transaction.find(filter)
             .populate({
                 path: 'processedBy',
-                select: 'username email'
+                select: 'username email role'
             })
             .populate({
                 path: 'user',
@@ -117,22 +319,21 @@ router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
             .skip(skip)
             .limit(limit);
         
-        // Process transactions to ensure processedByInfo is available
         const processedTransactions = transactions.map(txn => {
             const transaction = txn.toObject();
             
-            // If processedByInfo doesn't exist but processedBy does, create it
-            if (!transaction.processedByInfo && transaction.processedBy) {
+            if (transaction.processedBy) {
                 transaction.processedByInfo = {
+                    adminId: transaction.processedBy._id,
                     username: transaction.processedBy.username,
-                    email: transaction.processedBy.email
+                    email: transaction.processedBy.email,
+                    role: transaction.processedBy.role
                 };
             }
             
             return transaction;
         });
         
-        // Add pagination metadata
         const totalPages = Math.ceil(total / limit);
         
         res.status(200).json({
@@ -145,6 +346,12 @@ router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
                 totalPages,
                 hasNextPage: page < totalPages,
                 hasPrevPage: page > 1
+            },
+            accessedBy: {
+                adminId: req.user._id,
+                adminUsername: req.user.username,
+                adminRole: req.user.role,
+                timestamp: new Date()
             }
         });
     } catch (error) {
@@ -158,15 +365,13 @@ router.get('/users/:userId/transactions', auth, adminAuth, async (req, res) => {
     }
 });
 
-// GET all transactions (admin only)
-router.get('/transactions', auth, adminAuth, async (req, res) => {
+// GET all transactions (FULL ADMIN ONLY)
+router.get('/transactions', auth, adminAuth, requireFullAdmin, async (req, res) => {
     try {
-        // Add pagination support
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
         const skip = (page - 1) * limit;
         
-        // Add filtering options
         const filter = {};
         
         if (req.query.type) {
@@ -192,10 +397,8 @@ router.get('/transactions', auth, adminAuth, async (req, res) => {
             };
         }
         
-        // Count total documents for pagination metadata
         const total = await Transaction.countDocuments(filter);
         
-        // Fetch transactions with related user and admin details
         const transactions = await Transaction.find(filter)
             .populate({
                 path: 'user',
@@ -203,28 +406,27 @@ router.get('/transactions', auth, adminAuth, async (req, res) => {
             })
             .populate({
                 path: 'processedBy',
-                select: 'username email'
+                select: 'username email role'
             })
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit);
         
-        // Process transactions to ensure processedByInfo is available
         const processedTransactions = transactions.map(txn => {
             const transaction = txn.toObject();
             
-            // If processedByInfo doesn't exist but processedBy does, create it
-            if (!transaction.processedByInfo && transaction.processedBy) {
+            if (transaction.processedBy) {
                 transaction.processedByInfo = {
+                    adminId: transaction.processedBy._id,
                     username: transaction.processedBy.username,
-                    email: transaction.processedBy.email
+                    email: transaction.processedBy.email,
+                    role: transaction.processedBy.role
                 };
             }
             
             return transaction;
         });
         
-        // Add pagination metadata
         const totalPages = Math.ceil(total / limit);
         
         res.status(200).json({
@@ -250,10 +452,11 @@ router.get('/transactions', auth, adminAuth, async (req, res) => {
     }
 });
 
-// POST add money to user wallet (admin only)
-router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) => {
+// POST add money to user wallet (ADMIN & CREDIT_ADMIN ONLY)
+router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin, async (req, res) => {
     try {
         const { amount, description, paymentMethod, paymentDetails } = req.body;
+        const targetUserId = req.params.userId;
         
         if (!amount || isNaN(amount) || amount <= 0) {
             return res.status(400).json({ 
@@ -262,7 +465,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
             });
         }
         
-        const user = await User.findById(req.params.userId);
+        const user = await User.findById(targetUserId);
         
         if (!user) {
             return res.status(404).json({ 
@@ -271,8 +474,8 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
             });
         }
         
-        // Get admin information
-        const admin = await User.findById(req.user.id).select('username email');
+        // Admin is already fetched in adminAuth middleware
+        const admin = req.user;
         
         // Perform wallet operation
         const balanceBefore = user.wallet ? user.wallet.balance || 0 : 0;
@@ -281,7 +484,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
         if (!user.wallet) {
             user.wallet = {
                 balance: 0,
-                currency: 'GHS', // Changed to GHS
+                currency: 'GHS',
                 transactions: []
             };
         }
@@ -290,24 +493,48 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
         const balanceAfter = user.wallet.balance;
         user.updatedAt = Date.now();
         
-        // Create transaction record with admin tracking
+        // Create transaction record with admin role tracking
         const transaction = new Transaction({
             user: user._id,
             type: 'deposit',
             amount: parseFloat(amount),
-            currency: user.wallet.currency || 'GHS', // Changed to GHS
-            description: description || 'Admin deposit',
+            currency: user.wallet.currency || 'GHS',
+            description: description || `Wallet credit by ${admin.username} (${admin.role})`,
             status: 'completed',
             reference: 'DEP-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
             balanceBefore,
             balanceAfter,
-            processedBy: req.user.id,
+            processedBy: admin._id,
             processedByInfo: {
+                adminId: admin._id,
                 username: admin.username,
-                email: admin.email
+                email: admin.email,
+                role: admin.role,
+                actionType: 'credit',
+                actionTimestamp: new Date(),
+                ipAddress: req.ip
             },
-            paymentMethod: paymentMethod || 'admin',
-            paymentDetails: paymentDetails || { method: 'manual', by: admin.username }
+            paymentMethod: paymentMethod || 'admin_credit',
+            paymentDetails: {
+                ...paymentDetails,
+                method: 'manual_credit',
+                creditedBy: admin.username,
+                creditedByRole: admin.role,
+                originalAmount: parseFloat(amount),
+                targetUser: {
+                    id: user._id,
+                    username: user.username,
+                    email: user.email
+                }
+            },
+            metadata: {
+                adminAction: 'wallet_credit',
+                performedBy: admin._id,
+                performedByRole: admin.role,
+                performedAt: new Date(),
+                clientIp: req.ip,
+                userAgent: req.get('User-Agent')
+            }
         });
         
         await transaction.save();
@@ -320,9 +547,24 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
         user.wallet.transactions.push(transaction._id);
         await user.save();
         
+        // Log admin action
+        await logAdminAction(admin._id, 'credit_user_wallet', targetUserId, {
+            amount: parseFloat(amount),
+            description,
+            balanceBefore,
+            balanceAfter,
+            transactionId: transaction._id,
+            ipAddress: req.ip,
+            adminRole: admin.role,
+            targetUser: {
+                username: user.username,
+                email: user.email
+            }
+        });
+        
         res.status(200).json({
             success: true,
-            message: 'Funds added successfully',
+            message: 'Funds credited successfully',
             transaction: {
                 id: transaction._id,
                 type: 'deposit',
@@ -330,8 +572,18 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
                 balanceBefore,
                 balanceAfter,
                 reference: transaction.reference,
-                processedBy: admin.username,
-                date: transaction.createdAt
+                creditedBy: {
+                    adminId: admin._id,
+                    username: admin.username,
+                    role: admin.role,
+                    canCredit: ['admin', 'credit_admin'].includes(admin.role),
+                    canDebit: ['admin', 'debit_admin'].includes(admin.role)
+                },
+                date: transaction.createdAt,
+                targetUser: {
+                    username: user.username,
+                    email: user.email
+                }
             }
         });
     } catch (error) {
@@ -344,10 +596,11 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, async (req, res) =
     }
 });
 
-// POST deduct money from user wallet (admin only)
-router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => {
+// POST deduct money from user wallet (ADMIN & DEBIT_ADMIN ONLY)  
+router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, async (req, res) => {
     try {
         const { amount, description, paymentMethod, paymentDetails } = req.body;
+        const targetUserId = req.params.userId;
         
         if (!amount || isNaN(amount) || amount <= 0) {
             return res.status(400).json({
@@ -356,7 +609,7 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => 
             });
         }
         
-        const user = await User.findById(req.params.userId);
+        const user = await User.findById(targetUserId);
         
         if (!user) {
             return res.status(404).json({
@@ -373,32 +626,56 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => 
             });
         }
         
-        // Get admin information
-        const admin = await User.findById(req.user.id).select('username email');
+        // Admin is already fetched in adminAuth middleware
+        const admin = req.user;
         
         const balanceBefore = user.wallet.balance;
         user.wallet.balance = balanceBefore - parseFloat(amount);
         const balanceAfter = user.wallet.balance;
         user.updatedAt = Date.now();
         
-        // Create transaction record with admin tracking
+        // Create transaction record with admin role tracking
         const transaction = new Transaction({
             user: user._id,
             type: 'debit',
             amount: parseFloat(amount),
-            currency: user.wallet.currency || 'GHS', // Changed to GHS
-            description: description || 'Admin debit',
+            currency: user.wallet.currency || 'GHS',
+            description: description || `Wallet debit by ${admin.username} (${admin.role})`,
             status: 'completed',
             reference: 'DEB-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
             balanceBefore,
             balanceAfter,
-            processedBy: req.user.id,
+            processedBy: admin._id,
             processedByInfo: {
+                adminId: admin._id,
                 username: admin.username,
-                email: admin.email
+                email: admin.email,
+                role: admin.role,
+                actionType: 'debit',
+                actionTimestamp: new Date(),
+                ipAddress: req.ip
             },
-            paymentMethod: paymentMethod || 'admin',
-            paymentDetails: paymentDetails || { method: 'manual', by: admin.username }
+            paymentMethod: paymentMethod || 'admin_debit',
+            paymentDetails: {
+                ...paymentDetails,
+                method: 'manual_debit',
+                debitedBy: admin.username,
+                debitedByRole: admin.role,
+                originalAmount: parseFloat(amount),
+                targetUser: {
+                    id: user._id,
+                    username: user.username,
+                    email: user.email
+                }
+            },
+            metadata: {
+                adminAction: 'wallet_debit',
+                performedBy: admin._id,
+                performedByRole: admin.role,
+                performedAt: new Date(),
+                clientIp: req.ip,
+                userAgent: req.get('User-Agent')
+            }
         });
         
         await transaction.save();
@@ -407,13 +684,27 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => 
         if (!user.wallet.transactions) {
             user.wallet.transactions = [];
         }
-        
         user.wallet.transactions.push(transaction._id);
         await user.save();
         
+        // Log admin action
+        await logAdminAction(admin._id, 'debit_user_wallet', targetUserId, {
+            amount: parseFloat(amount),
+            description,
+            balanceBefore,
+            balanceAfter,
+            transactionId: transaction._id,
+            ipAddress: req.ip,
+            adminRole: admin.role,
+            targetUser: {
+                username: user.username,
+                email: user.email
+            }
+        });
+        
         res.status(200).json({
             success: true,
-            message: 'Funds deducted successfully',
+            message: 'Funds debited successfully',
             transaction: {
                 id: transaction._id,
                 type: 'debit',
@@ -421,8 +712,18 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => 
                 balanceBefore,
                 balanceAfter,
                 reference: transaction.reference,
-                processedBy: admin.username,
-                date: transaction.createdAt
+                debitedBy: {
+                    adminId: admin._id,
+                    username: admin.username,
+                    role: admin.role,
+                    canCredit: ['admin', 'credit_admin'].includes(admin.role),
+                    canDebit: ['admin', 'debit_admin'].includes(admin.role)
+                },
+                date: transaction.createdAt,
+                targetUser: {
+                    username: user.username,
+                    email: user.email
+                }
             }
         });
     } catch (error) {
@@ -435,114 +736,249 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, async (req, res) => 
     }
 });
 
-// DELETE a user (admin only)
-router.delete('/users/:userId', auth, adminAuth, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.userId);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+// PATCH change user role (FULL ADMIN ONLY)
+router.patch('/users/:userId/role', auth, adminAuth, requireFullAdmin, async (req, res) => {
+    try {
+        const { role } = req.body;
+        const targetUserId = req.params.userId;
+        
+        if (!role || !['admin', 'user', 'agent', 'Editor', 'credit_admin', 'debit_admin'].includes(role)) {
+            return res.status(400).json({ 
+                message: 'Valid role is required (admin, user, agent, Editor, credit_admin, or debit_admin)' 
+            });
+        }
+        
+        const user = await User.findById(targetUserId);
+        
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // Don't allow the last admin to change their role
+        if (user.role === 'admin' && role !== 'admin') {
+            const adminCount = await User.countDocuments({ role: 'admin' });
+            if (adminCount <= 1) {
+                return res.status(400).json({ message: 'Cannot change role of the last admin user' });
+            }
+        }
+        
+        const previousRole = user.role;
+        user.role = role;
+        user.updatedAt = Date.now();
+        
+        await user.save();
+        
+        // Admin is already fetched in adminAuth middleware
+        const admin = req.user;
+        
+        // Log admin action
+        await logAdminAction(admin._id, 'change_user_role', targetUserId, {
+            previousRole,
+            newRole: role,
+            ipAddress: req.ip,
+            targetUser: {
+                username: user.username,
+                email: user.email
+            },
+            changedBy: {
+                username: admin.username,
+                role: admin.role
+            }
+        });
+        
+        res.status(200).json({
+            message: `User role updated from ${previousRole} to ${role} successfully`,
+            username: user.username,
+            previousRole,
+            newRole: role,
+            rolePermissions: {
+                canViewAllUsers: role === 'admin',
+                canViewAllTransactions: role === 'admin',
+                canCredit: ['admin', 'credit_admin'].includes(role),
+                canDebit: ['admin', 'debit_admin'].includes(role),
+                canChangeRoles: role === 'admin',
+                canDeleteUsers: role === 'admin'
+            },
+            changedBy: {
+                adminId: admin._id,
+                username: admin.username,
+                role: admin.role,
+                timestamp: new Date()
+            }
+        });
+    } catch (error) {
+        console.error('Error changing user role:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
     }
-    
-    await User.findByIdAndDelete(req.params.userId);
-    res.status(200).json({ message: 'User deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting user:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
 });
 
-// PATCH disable a user (toggle isActive status)
-router.patch('/users/:userId/status', auth, adminAuth, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.userId);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+// PATCH disable/enable user (FULL ADMIN ONLY)
+router.patch('/users/:userId/status', auth, adminAuth, requireFullAdmin, async (req, res) => {
+    try {
+        const targetUserId = req.params.userId;
+        const user = await User.findById(targetUserId);
+        
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        const previousStatus = user.isActive;
+        user.isActive = !user.isActive;
+        user.updatedAt = Date.now();
+        
+        await user.save();
+        
+        // Admin is already fetched in adminAuth middleware
+        const admin = req.user;
+        
+        // Log admin action
+        await logAdminAction(admin._id, 'change_user_status', targetUserId, {
+            previousStatus,
+            newStatus: user.isActive,
+            action: user.isActive ? 'enabled' : 'disabled',
+            ipAddress: req.ip,
+            targetUser: {
+                username: user.username,
+                email: user.email
+            },
+            changedBy: {
+                username: admin.username,
+                role: admin.role
+            }
+        });
+        
+        res.status(200).json({
+            message: `User ${user.isActive ? 'enabled' : 'disabled'} successfully`,
+            isActive: user.isActive,
+            username: user.username,
+            changedBy: {
+                adminId: admin._id,
+                username: admin.username,
+                role: admin.role,
+                timestamp: new Date()
+            }
+        });
+    } catch (error) {
+        console.error('Error updating user status:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
     }
-    
-    user.isActive = !user.isActive;
-    user.updatedAt = Date.now();
-    
-    await user.save();
-    
-    res.status(200).json({
-      message: `User ${user.isActive ? 'enabled' : 'disabled'} successfully`,
-      isActive: user.isActive
-    });
-  } catch (error) {
-    console.error('Error updating user status:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
 });
 
-// DELETE user API key
-router.delete('/users/:userId/api-key', auth, async (req, res) => {
-  try {
-    // Check if user is requesting their own API key deletion or is an admin
-    if (req.user.id !== req.params.userId && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Not authorized to perform this action' });
+// DELETE a user (FULL ADMIN ONLY)
+router.delete('/users/:userId', auth, adminAuth, requireFullAdmin, async (req, res) => {
+    try {
+        const targetUserId = req.params.userId;
+        const user = await User.findById(targetUserId);
+        
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // Store user info for logging before deletion
+        const deletedUserInfo = {
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            isActive: user.isActive,
+            createdAt: user.createdAt
+        };
+        
+        await User.findByIdAndDelete(targetUserId);
+        
+        // Admin is already fetched in adminAuth middleware
+        const admin = req.user;
+        
+        // Log admin action
+        await logAdminAction(admin._id, 'delete_user', targetUserId, {
+            deletedUser: deletedUserInfo,
+            ipAddress: req.ip,
+            deletedBy: {
+                username: admin.username,
+                role: admin.role
+            }
+        });
+        
+        res.status(200).json({ 
+            message: 'User deleted successfully',
+            deletedUser: {
+                username: deletedUserInfo.username,
+                email: deletedUserInfo.email
+            },
+            deletedBy: {
+                adminId: admin._id,
+                username: admin.username,
+                role: admin.role,
+                timestamp: new Date()
+            }
+        });
+    } catch (error) {
+        console.error('Error deleting user:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
     }
-    
-    const user = await User.findById(req.params.userId);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    user.apiKey = undefined;
-    user.updatedAt = Date.now();
-    
-    await user.save();
-    
-    res.status(200).json({ message: 'API key deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting API key:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
 });
 
-// PATCH change user role (admin only)
-router.patch('/users/:userId/role', auth, adminAuth, async (req, res) => {
-  try {
-    const { role } = req.body;
-    
-    if (!role || !['admin', 'user', 'agent', 'Editor'].includes(role)) {
-      return res.status(400).json({ message: 'Valid role is required (admin, user, agent, or Editor)' });
+// GET admin activity log (FULL ADMIN ONLY)
+router.get('/admin-logs', auth, adminAuth, requireFullAdmin, async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const skip = (page - 1) * limit;
+        
+        // Filter options
+        const filter = {};
+        
+        if (req.query.adminId) {
+            filter.user = req.query.adminId;
+        }
+        
+        if (req.query.action) {
+            filter['requestData.action'] = req.query.action;
+        }
+        
+        if (req.query.startDate && req.query.endDate) {
+            filter.createdAt = {
+                $gte: new Date(req.query.startDate),
+                $lte: new Date(req.query.endDate)
+            };
+        }
+        
+        const total = await ApiLog.countDocuments(filter);
+        
+        const logs = await ApiLog.find(filter)
+            .populate({
+                path: 'user',
+                select: 'username email role'
+            })
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+        
+        const totalPages = Math.ceil(total / limit);
+        
+        res.status(200).json({
+            success: true,
+            data: logs,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages,
+                hasNextPage: page < totalPages,
+                hasPrevPage: page > 1
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching admin logs:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while fetching admin logs',
+            error: error.message
+        });
     }
-    
-    const user = await User.findById(req.params.userId);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    // Don't allow the last admin to change their role
-    if (user.role === 'admin' && role !== 'admin') {
-      const adminCount = await User.countDocuments({ role: 'admin' });
-      if (adminCount <= 1) {
-        return res.status(400).json({ message: 'Cannot change role of the last admin user' });
-      }
-    }
-    
-    user.role = role;
-    user.updatedAt = Date.now();
-    
-    await user.save();
-    
-    res.status(200).json({
-      message: `User role updated to ${role} successfully`,
-      username: user.username,
-      role: user.role
-    });
-  } catch (error) {
-    console.error('Error changing user role:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
 });
 
-// GET top users with most sales in the past 6 days
-router.get('/top-sales-users', auth, adminAuth, async (req, res) => {
+// GET top users with most sales in the past 6 days (FULL ADMIN ONLY)
+router.get('/top-sales-users', auth, adminAuth, requireFullAdmin, async (req, res) => {
     try {
       // Calculate the date 6 days ago from today
       const sixDaysAgo = new Date();
@@ -615,10 +1051,10 @@ router.get('/top-sales-users', auth, adminAuth, async (req, res) => {
         error: error.message
       });
     }
-  });
+});
   
-  // POST reward top sales performers
-  router.post('/reward-top-performers', auth, adminAuth, async (req, res) => {
+// POST reward top sales performers (FULL ADMIN ONLY)
+router.post('/reward-top-performers', auth, adminAuth, requireFullAdmin, async (req, res) => {
     try {
       const { percentages, description } = req.body;
       
@@ -663,8 +1099,8 @@ router.get('/top-sales-users', auth, adminAuth, async (req, res) => {
         });
       }
       
-      // Get admin information
-      const admin = await User.findById(req.user.id).select('username email');
+      // Admin is already fetched in adminAuth middleware
+      const admin = req.user;
       
       // Process rewards for each top performer
       const rewards = [];
@@ -728,10 +1164,12 @@ router.get('/top-sales-users', auth, adminAuth, async (req, res) => {
           reference: 'REW-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
           balanceBefore,
           balanceAfter,
-          processedBy: req.user.id,
+          processedBy: admin._id,
           processedByInfo: {
+            adminId: admin._id,
             username: admin.username,
-            email: admin.email
+            email: admin.email,
+            role: admin.role
           },
           paymentMethod: 'admin',
           paymentDetails: { 
@@ -784,9 +1222,6 @@ router.get('/top-sales-users', auth, adminAuth, async (req, res) => {
         error: error.message
       });
     }
-  });
-  
-  // POST reward top sales performers
-  
+});
 
 module.exports = router;

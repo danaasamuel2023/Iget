@@ -1,16 +1,23 @@
-// MongoDB Schema for Bundle Selling Syste
+// Updated User Schema with new admin roles
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-// User Schema
+// User Schema with enhanced role system
 const userSchema = new Schema({
   username: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  phone: { type: String, required: true }, // Added phone field
+  phone: { type: String, required: true },
   role: { 
     type: String, 
-    enum: ['admin', 'user', 'agent','Editor'], 
+    enum: [
+      'admin',        // Full admin - can do everything
+      'user',         // Regular user
+      'agent',        // Agent role
+      'Editor',       // Editor role
+      'credit_admin', // Can only credit user wallets
+      'debit_admin'   // Can only debit user wallets
+    ], 
     default: 'user' 
   },
   apiKey: { type: String, unique: true },
@@ -23,8 +30,87 @@ const userSchema = new Schema({
     }]
   },
   isActive: { type: Boolean, default: true },
+  
+  // Admin-specific fields for tracking
+  adminMetadata: {
+    createdBy: { 
+      type: Schema.Types.ObjectId, 
+      ref: 'IgetUser' 
+    },
+    roleChangedBy: { 
+      type: Schema.Types.ObjectId, 
+      ref: 'IgetUser' 
+    },
+    roleChangedAt: { type: Date },
+    lastLoginAt: { type: Date },
+    permissions: {
+      canViewUsers: { type: Boolean, default: false },
+      canViewTransactions: { type: Boolean, default: false },
+      canCredit: { type: Boolean, default: false },
+      canDebit: { type: Boolean, default: false },
+      canChangeRoles: { type: Boolean, default: false },
+      canDeleteUsers: { type: Boolean, default: false }
+    }
+  },
+  
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
+});
+
+// Method to update permissions based on role
+userSchema.methods.updatePermissions = function() {
+  switch(this.role) {
+    case 'admin':
+      this.adminMetadata.permissions = {
+        canViewUsers: true,
+        canViewTransactions: true,
+        canCredit: true,
+        canDebit: true,
+        canChangeRoles: true,
+        canDeleteUsers: true
+      };
+      break;
+    case 'credit_admin':
+      this.adminMetadata.permissions = {
+        canViewUsers: false,
+        canViewTransactions: false,
+        canCredit: true,
+        canDebit: false,
+        canChangeRoles: false,
+        canDeleteUsers: false
+      };
+      break;
+    case 'debit_admin':
+      this.adminMetadata.permissions = {
+        canViewUsers: false,
+        canViewTransactions: false,
+        canCredit: false,
+        canDebit: true,
+        canChangeRoles: false,
+        canDeleteUsers: false
+      };
+      break;
+    default:
+      this.adminMetadata.permissions = {
+        canViewUsers: false,
+        canViewTransactions: false,
+        canCredit: false,
+        canDebit: false,
+        canChangeRoles: false,
+        canDeleteUsers: false
+      };
+  }
+};
+
+// Pre-save middleware to update permissions
+userSchema.pre('save', function(next) {
+  if (this.isModified('role')) {
+    this.updatePermissions();
+    this.adminMetadata.roleChangedAt = new Date();
+  }
+  
+  this.updatedAt = new Date();
+  next();
 });
 
 // API Key generation method
@@ -34,98 +120,29 @@ userSchema.methods.generateApiKey = function() {
   return apiKey;
 };
 
-// Bundle Schema - Simplified as requested
-const bundleSchema = new Schema({
-  capacity: { type: Number, required: true }, // Data capacity in MB
-  // Base price
-  price: { type: Number, required: true },
-  // Role-specific pricing
-  rolePricing: {
-    admin: { type: Number },
-    user: { type: Number },
-    agent: { type: Number },
-    Editor: { type: Number }
-  },
-  type: { 
-    type: String, 
-    enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
-    required: true
-  },
-  isActive: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-// Add a method to get price based on user role
-bundleSchema.methods.getPriceForRole = function(role) {
-  // If role-specific price exists, return it, otherwise return the base price
-  return (this.rolePricing && this.rolePricing[role]) || this.price;
+// Method to check if user has specific permission
+userSchema.methods.hasPermission = function(permission) {
+  if (!this.adminMetadata || !this.adminMetadata.permissions) {
+    return false;
+  }
+  return this.adminMetadata.permissions[permission] || false;
 };
-// Order Schema
-const orderSchema = new Schema({
-  user: {
-    type: Schema.Types.ObjectId,
-    ref: 'IgetUser',
-    required: true
-  },
-  bundleType: { 
-    type: String, 
-    enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
-    required: true
-  },
-  capacity: { type: Number, required: true }, // Data capacity in MB
-  price: { type: Number, required: true },
-  recipientNumber: { type: String, required: true },
-  orderReference: { type: String, unique: true },
-  
-  // Added API-specific fields
-  apiReference: { type: String }, // To store the API reference number
-  apiOrderId: { type: String },   // To store the API order ID
-  
-  status: { 
-    type: String, 
-    enum: ['initiated', 'pending', 'processing', 'completed', 'failed', 'refunded', 'api_error'],
-    default: 'pending'
-  },
-  // Metadata field to store AFA-specific registration data
-  metadata: {
-    type: Schema.Types.Mixed,
-    default: {}
-  },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-  completedAt: { type: Date },
-  failureReason: { type: String }
-});
 
-// Generate order reference before saving
-orderSchema.pre('save', function(next) {
-  if (!this.orderReference) {
-    // For API orders, check if we have an apiReference to use
-    if (this.apiReference) {
-      this.orderReference = this.apiReference;
-    } else {
-      // Create different prefixes for different bundle types
-      const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
-      this.orderReference = Math.floor(1000 + Math.random() * 900000);
-    }
-  }
+// Method to get role description
+userSchema.methods.getRoleDescription = function() {
+  const descriptions = {
+    'admin': 'Full administrative access to all features',
+    'credit_admin': 'Can only credit user wallets and view own actions',
+    'debit_admin': 'Can only debit user wallets and view own actions',
+    'user': 'Regular user with standard features',
+    'agent': 'Agent with extended user features',
+    'Editor': 'Editor with content management features'
+  };
   
-  // Update timestamps
-  if (this.isModified('status')) {
-    this.updatedAt = new Date();
-    
-    // Only set completedAt if status is specifically changed to 'completed'
-    if (this.status === 'completed' && !this.completedAt) {
-      this.completedAt = new Date();
-    }
-  }
-  
-  next();
-});
+  return descriptions[this.role] || 'Unknown role';
+};
 
-
-// Transaction Schema enhanced with metadata field
+// Enhanced Transaction Schema to track admin actions better
 const transactionSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
@@ -157,30 +174,48 @@ const transactionSchema = new Schema({
     ref: 'IgetUser'
   },
   processedByInfo: {
+    adminId: { type: Schema.Types.ObjectId },
     username: String,
-    email: String
+    email: String,
+    role: { 
+      type: String, 
+      enum: ['admin', 'credit_admin', 'debit_admin', 'user', 'agent', 'Editor'] 
+    },
+    actionType: { 
+      type: String, 
+      enum: ['credit', 'debit', 'adjustment', 'reward'] 
+    },
+    actionTimestamp: { type: Date },
+    ipAddress: String
   },
   paymentMethod: { type: String },
   paymentDetails: { type: Schema.Types.Mixed },
-  // Added metadata field for AFA-specific transaction data
+  
+  // Enhanced metadata for better admin tracking
   metadata: {
-    type: Schema.Types.Mixed,
-    default: {}
+    adminAction: String,
+    performedBy: { type: Schema.Types.ObjectId },
+    performedByRole: String,
+    performedAt: { type: Date },
+    clientIp: String,
+    userAgent: String,
+    // Additional tracking for audit purposes
+    auditTrail: {
+      originalRequest: { type: Schema.Types.Mixed },
+      validationPassed: { type: Boolean, default: true },
+      authorizationLevel: String
+    }
   },
+  
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
 
-
-
-// Transaction Schema
-
-
-// API Request Log Schema
+// Enhanced API Log Schema for admin action tracking
 const apiLogSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'IgetUser'
   },
   apiKey: { type: String },
   endpoint: { type: String },
@@ -188,35 +223,31 @@ const apiLogSchema = new Schema({
   requestData: { type: Schema.Types.Mixed },
   responseData: { type: Schema.Types.Mixed },
   ipAddress: { type: String },
+  userAgent: { type: String },
   status: { type: Number }, // HTTP status code
   executionTime: { type: Number }, // in milliseconds
-  createdAt: { type: Date, default: Date.now }
-});
-
-// System Settings Schema
-const settingsSchema = new Schema({
-  name: { type: String, required: true, unique: true },
-  value: { type: Schema.Types.Mixed, required: true },
-  description: { type: String },
-  updatedBy: {
-    type: Schema.Types.ObjectId,
-    ref: 'IgetUser'
+  
+  // Enhanced admin tracking
+  adminMetadata: {
+    adminRole: String,
+    targetUserId: { type: Schema.Types.ObjectId },
+    actionType: String,
+    actionDescription: String,
+    affectedRecords: Number,
+    sensitiveAction: { type: Boolean, default: false }
   },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
+  
+  createdAt: { type: Date, default: Date.now }
 });
 
 // Create models
 const UserModel = mongoose.model('IgetUser', userSchema);
-const BundleModel = mongoose.model('Bundle', bundleSchema);
-const OrderModel = mongoose.model('IgetOrder', orderSchema);
 const TransactionModel = mongoose.model('IgetTransaction', transactionSchema);
+const ApiLogModel = mongoose.model('ApiLog', apiLogSchema);
 
-// Then export with the names your routes expect
+// Export models
 module.exports = {
   User: UserModel,
-  Bundle: BundleModel,
-  Order: OrderModel,
   Transaction: TransactionModel,
- 
+  ApiLog: ApiLogModel
 };
