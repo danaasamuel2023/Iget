@@ -2,59 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { User, Transaction, ApiLog } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth'); 
-
-// Enhanced admin middleware with role-based permissions and proper error handling
-const adminAuth = async (req, res, next) => {
-  try {
-    // Check if auth middleware properly set req.user
-    if (!req.user || !req.user._id) {
-      console.error('AdminAuth: req.user is missing or invalid:', req.user);
-  return res.status(401).json({
-    success: false,
-    message: 'Authentication required - user not found'
-  });
-}
-
-// Fetch fresh user data from database to ensure we have current role
-const user = await User.findById(req.user._id || req.user.id).select('username email role isActive');
-
-if (!user) {
-  console.error('AdminAuth: User not found in database:', req.user._id || req.user.id);
-  return res.status(401).json({
-    success: false,
-    message: 'User not found'
-  });
-}
-
-    if (!user.isActive) {
-      return res.status(401).json({
-        success: false,
-        message: 'User account is deactivated'
-      });
-    }
-
-    // Check if user has any admin role
-    const allowedRoles = ['admin', 'credit_admin', 'debit_admin'];
-    if (!allowedRoles.includes(user.role)) {
-      console.error('AdminAuth: User does not have admin role:', user.role);
-      return res.status(403).json({
-        success: false,
-        message: 'Admin privileges required'
-      });
-    }
-
-    // Update req.user with fresh data
-    req.user = user;
-    next();
-  } catch (error) {
-    console.error('Admin auth middleware error:', error);
-    res.status(401).json({
-      success: false,
-      message: 'Admin authorization failed',
-      error: error.message
-    });
-  }
-};
+const adminAuth = require('../adminMiddlware/middleware');
 
 // Specific role checking middleware
 const requireFullAdmin = (req, res, next) => {
@@ -67,21 +15,40 @@ const requireFullAdmin = (req, res, next) => {
   next();
 };
 
-const requireCreditAdmin = (req, res, next) => {
-  if (!req.user || !['admin', 'credit_admin'].includes(req.user.role)) {
+// Updated middleware for unified wallet operations (both credit and debit) - EXCLUDES EDITORS
+const requireWalletAdmin = (req, res, next) => {
+  if (!req.user || !['admin', 'wallet_admin'].includes(req.user.role)) {
     return res.status(403).json({
       success: false,
-      message: 'Credit admin privileges required for this action'
+      message: 'Wallet admin privileges required for this action. You need admin or wallet_admin role.',
+      currentRole: req.user?.role,
+      note: 'Editors cannot access wallet operations'
     });
   }
   next();
 };
 
-const requireDebitAdmin = (req, res, next) => {
-  if (!req.user || !['admin', 'debit_admin'].includes(req.user.role)) {
+// Middleware for Editor role (order status updates) - EDITORS ONLY FOR ORDERS
+const requireEditor = (req, res, next) => {
+  if (!req.user || !['admin', 'Editor'].includes(req.user.role)) {
     return res.status(403).json({
       success: false,
-      message: 'Debit admin privileges required for this action'
+      message: 'Editor privileges required for this action. You need admin or Editor role.',
+      currentRole: req.user?.role
+    });
+  }
+  next();
+};
+
+// NEW: Middleware to block Editors from user operations
+const blockEditors = (req, res, next) => {
+  if (req.user && req.user.role === 'Editor') {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Editors cannot access user management features.',
+      currentRole: req.user.role,
+      allowedActions: ['View and update order statuses only'],
+      redirectTo: '/admin-orders'
     });
   }
   next();
@@ -112,7 +79,6 @@ const logAdminAction = async (adminId, action, targetUserId = null, details = {}
 // GET current admin permissions (available to all admin types)
 router.get('/my-permissions', auth, adminAuth, async (req, res) => {
     try {
-        // req.user should already be populated by adminAuth middleware
         if (!req.user) {
             return res.status(401).json({
                 success: false,
@@ -120,23 +86,35 @@ router.get('/my-permissions', auth, adminAuth, async (req, res) => {
             });
         }
 
-        const admin = req.user; // Already fetched in adminAuth middleware
+        const admin = req.user;
         
         const permissions = {
             role: admin.role,
-            canViewAllUsers: true, // All admin types can now view users (but with different data)
-            canViewUsersForWallet: true, // New permission for wallet operations
+            // Editors cannot view users
+            canViewAllUsers: ['admin', 'wallet_admin'].includes(admin.role),
+            canViewUsersForWallet: ['admin', 'wallet_admin'].includes(admin.role),
             canViewAllTransactions: admin.role === 'admin',
-            canCredit: ['admin', 'credit_admin'].includes(admin.role),
-            canDebit: ['admin', 'debit_admin'].includes(admin.role),
+            canCredit: ['admin', 'wallet_admin'].includes(admin.role), // Unified wallet admin
+            canDebit: ['admin', 'wallet_admin'].includes(admin.role),  // Unified wallet admin
             canChangeRoles: admin.role === 'admin',
             canDeleteUsers: admin.role === 'admin',
             canChangeUserStatus: admin.role === 'admin',
             canViewAdminLogs: admin.role === 'admin',
             canRewardUsers: admin.role === 'admin',
+            canUpdateOrderStatus: ['admin', 'Editor'].includes(admin.role), // Editor can update orders
             // New detailed permissions
             hasFullUserAccess: admin.role === 'admin',
-            hasLimitedUserAccess: ['credit_admin', 'debit_admin'].includes(admin.role)
+            hasLimitedUserAccess: admin.role === 'wallet_admin', // Editors removed
+            isUnifiedWalletAdmin: admin.role === 'wallet_admin',
+            isEditor: admin.role === 'Editor',
+            // Editor-specific restrictions
+            editorRestrictions: admin.role === 'Editor' ? {
+                cannotAccessUsers: true,
+                cannotAccessWallet: true,
+                cannotAccessTransactions: true,
+                cannotAccessSettings: true,
+                onlyOrderAccess: true
+            } : null
         };
         
         res.status(200).json({
@@ -150,8 +128,8 @@ router.get('/my-permissions', auth, adminAuth, async (req, res) => {
             permissions,
             roleDescription: {
                 admin: 'Full administrative access to all features',
-                credit_admin: 'Can view users and credit user wallets only',
-                debit_admin: 'Can view users and debit user wallets only'
+                wallet_admin: 'Can view users and perform both credit and debit wallet operations',
+                Editor: 'Can ONLY view and update order statuses - NO access to users, wallets, or other admin features'
             }[admin.role]
         });
     } catch (error) {
@@ -164,8 +142,8 @@ router.get('/my-permissions', auth, adminAuth, async (req, res) => {
     }
 });
 
-// GET all users (ALL ADMIN TYPES - but with different data based on role)
-router.get('/users', auth, adminAuth, async (req, res) => {
+// GET all users (ADMIN & WALLET_ADMIN ONLY - EDITORS BLOCKED)
+router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (req, res) => {
     try {
         // Log admin action
         await logAdminAction(req.user._id, 'view_users', null, { 
@@ -227,8 +205,8 @@ router.get('/users', auth, adminAuth, async (req, res) => {
                     timestamp: new Date()
                 }
             };
-        } else {
-            // Credit/Debit admins get limited user data - only what they need for wallet operations
+        } else if (req.user.role === 'wallet_admin') {
+            // wallet_admin gets limited user data - only what they need for wallet operations
             selectFields = 'username email wallet role isActive createdAt';
             const users = await User.find(filter)
                 .select(selectFields)
@@ -254,7 +232,7 @@ router.get('/users', auth, adminAuth, async (req, res) => {
                     timestamp: new Date()
                 },
                 limitedAccess: true,
-                note: `Limited user data for ${req.user.role} role`
+                note: `Limited user data for ${req.user.role} role - wallet operations only`
             };
         }
         
@@ -270,8 +248,8 @@ router.get('/users', auth, adminAuth, async (req, res) => {
     }
 });
 
-// GET user's transaction history (FULL ADMIN ONLY)
-router.get('/users/:userId/transactions', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// GET user's transaction history (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.get('/users/:userId/transactions', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
         const userId = req.params.userId;
         
@@ -365,8 +343,8 @@ router.get('/users/:userId/transactions', auth, adminAuth, requireFullAdmin, asy
     }
 });
 
-// GET all transactions (FULL ADMIN ONLY)
-router.get('/transactions', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// GET all transactions (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.get('/transactions', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
@@ -452,8 +430,8 @@ router.get('/transactions', auth, adminAuth, requireFullAdmin, async (req, res) 
     }
 });
 
-// POST add money to user wallet (ADMIN & CREDIT_ADMIN ONLY)
-router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin, async (req, res) => {
+// POST add money to user wallet (ADMIN & WALLET_ADMIN ONLY - EDITORS BLOCKED)
+router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requireWalletAdmin, async (req, res) => {
     try {
         const { amount, description, paymentMethod, paymentDetails } = req.body;
         const targetUserId = req.params.userId;
@@ -493,7 +471,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
         const balanceAfter = user.wallet.balance;
         user.updatedAt = Date.now();
         
-        // Create transaction record with admin role tracking
+        // Create transaction record with unified wallet admin tracking
         const transaction = new Transaction({
             user: user._id,
             type: 'deposit',
@@ -512,7 +490,9 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
                 role: admin.role,
                 actionType: 'credit',
                 actionTimestamp: new Date(),
-                ipAddress: req.ip
+                ipAddress: req.ip,
+                // Add unified admin identifier
+                isUnifiedWalletAdmin: admin.role === 'wallet_admin'
             },
             paymentMethod: paymentMethod || 'admin_credit',
             paymentDetails: {
@@ -525,7 +505,8 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
                     id: user._id,
                     username: user.username,
                     email: user.email
-                }
+                },
+                unifiedWalletAdmin: admin.role === 'wallet_admin'
             },
             metadata: {
                 adminAction: 'wallet_credit',
@@ -533,7 +514,8 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
                 performedByRole: admin.role,
                 performedAt: new Date(),
                 clientIp: req.ip,
-                userAgent: req.get('User-Agent')
+                userAgent: req.get('User-Agent'),
+                unifiedWalletOperation: true // Flag for unified wallet operations
             }
         });
         
@@ -556,6 +538,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
             transactionId: transaction._id,
             ipAddress: req.ip,
             adminRole: admin.role,
+            unifiedWalletAdmin: admin.role === 'wallet_admin',
             targetUser: {
                 username: user.username,
                 email: user.email
@@ -576,8 +559,9 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
                     adminId: admin._id,
                     username: admin.username,
                     role: admin.role,
-                    canCredit: ['admin', 'credit_admin'].includes(admin.role),
-                    canDebit: ['admin', 'debit_admin'].includes(admin.role)
+                    isUnifiedWalletAdmin: admin.role === 'wallet_admin',
+                    canCredit: ['admin', 'wallet_admin'].includes(admin.role),
+                    canDebit: ['admin', 'wallet_admin'].includes(admin.role)
                 },
                 date: transaction.createdAt,
                 targetUser: {
@@ -596,8 +580,8 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, requireCreditAdmin
     }
 });
 
-// POST deduct money from user wallet (ADMIN & DEBIT_ADMIN ONLY)  
-router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, async (req, res) => {
+// POST deduct money from user wallet (ADMIN & WALLET_ADMIN ONLY - EDITORS BLOCKED)  
+router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requireWalletAdmin, async (req, res) => {
     try {
         const { amount, description, paymentMethod, paymentDetails } = req.body;
         const targetUserId = req.params.userId;
@@ -634,7 +618,7 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
         const balanceAfter = user.wallet.balance;
         user.updatedAt = Date.now();
         
-        // Create transaction record with admin role tracking
+        // Create transaction record with unified wallet admin tracking
         const transaction = new Transaction({
             user: user._id,
             type: 'debit',
@@ -653,7 +637,9 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
                 role: admin.role,
                 actionType: 'debit',
                 actionTimestamp: new Date(),
-                ipAddress: req.ip
+                ipAddress: req.ip,
+                // Add unified admin identifier
+                isUnifiedWalletAdmin: admin.role === 'wallet_admin'
             },
             paymentMethod: paymentMethod || 'admin_debit',
             paymentDetails: {
@@ -666,7 +652,8 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
                     id: user._id,
                     username: user.username,
                     email: user.email
-                }
+                },
+                unifiedWalletAdmin: admin.role === 'wallet_admin'
             },
             metadata: {
                 adminAction: 'wallet_debit',
@@ -674,7 +661,8 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
                 performedByRole: admin.role,
                 performedAt: new Date(),
                 clientIp: req.ip,
-                userAgent: req.get('User-Agent')
+                userAgent: req.get('User-Agent'),
+                unifiedWalletOperation: true // Flag for unified wallet operations
             }
         });
         
@@ -696,6 +684,7 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
             transactionId: transaction._id,
             ipAddress: req.ip,
             adminRole: admin.role,
+            unifiedWalletAdmin: admin.role === 'wallet_admin',
             targetUser: {
                 username: user.username,
                 email: user.email
@@ -716,8 +705,9 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
                     adminId: admin._id,
                     username: admin.username,
                     role: admin.role,
-                    canCredit: ['admin', 'credit_admin'].includes(admin.role),
-                    canDebit: ['admin', 'debit_admin'].includes(admin.role)
+                    isUnifiedWalletAdmin: admin.role === 'wallet_admin',
+                    canCredit: ['admin', 'wallet_admin'].includes(admin.role),
+                    canDebit: ['admin', 'wallet_admin'].includes(admin.role)
                 },
                 date: transaction.createdAt,
                 targetUser: {
@@ -736,29 +726,37 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, requireDebitAdmin, a
     }
 });
 
-// PATCH change user role (FULL ADMIN ONLY)
-router.patch('/users/:userId/role', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// PATCH change user role (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.patch('/users/:userId/role', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
         const { role } = req.body;
         const targetUserId = req.params.userId;
         
-        if (!role || !['admin', 'user', 'agent', 'Editor', 'credit_admin', 'debit_admin'].includes(role)) {
+        // Updated role list to include wallet_admin instead of separate credit/debit admins
+        if (!role || !['admin', 'user', 'agent', 'Editor', 'wallet_admin'].includes(role)) {
             return res.status(400).json({ 
-                message: 'Valid role is required (admin, user, agent, Editor, credit_admin, or debit_admin)' 
+                success: false,
+                message: 'Valid role is required (admin, user, agent, Editor, or wallet_admin)' 
             });
         }
         
         const user = await User.findById(targetUserId);
         
         if (!user) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
         }
         
         // Don't allow the last admin to change their role
         if (user.role === 'admin' && role !== 'admin') {
             const adminCount = await User.countDocuments({ role: 'admin' });
             if (adminCount <= 1) {
-                return res.status(400).json({ message: 'Cannot change role of the last admin user' });
+                return res.status(400).json({ 
+                    success: false,
+                    message: 'Cannot change role of the last admin user' 
+                });
             }
         }
         
@@ -787,6 +785,7 @@ router.patch('/users/:userId/role', auth, adminAuth, requireFullAdmin, async (re
         });
         
         res.status(200).json({
+            success: true,
             message: `User role updated from ${previousRole} to ${role} successfully`,
             username: user.username,
             previousRole,
@@ -794,10 +793,13 @@ router.patch('/users/:userId/role', auth, adminAuth, requireFullAdmin, async (re
             rolePermissions: {
                 canViewAllUsers: role === 'admin',
                 canViewAllTransactions: role === 'admin',
-                canCredit: ['admin', 'credit_admin'].includes(role),
-                canDebit: ['admin', 'debit_admin'].includes(role),
+                canCredit: ['admin', 'wallet_admin'].includes(role),
+                canDebit: ['admin', 'wallet_admin'].includes(role),
                 canChangeRoles: role === 'admin',
-                canDeleteUsers: role === 'admin'
+                canDeleteUsers: role === 'admin',
+                canUpdateOrderStatus: ['admin', 'Editor'].includes(role),
+                isUnifiedWalletAdmin: role === 'wallet_admin',
+                isEditor: role === 'Editor'
             },
             changedBy: {
                 adminId: admin._id,
@@ -808,18 +810,25 @@ router.patch('/users/:userId/role', auth, adminAuth, requireFullAdmin, async (re
         });
     } catch (error) {
         console.error('Error changing user role:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error', 
+            error: error.message 
+        });
     }
 });
 
-// PATCH disable/enable user (FULL ADMIN ONLY)
-router.patch('/users/:userId/status', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// PATCH disable/enable user (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.patch('/users/:userId/status', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
         const targetUserId = req.params.userId;
         const user = await User.findById(targetUserId);
         
         if (!user) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
         }
         
         const previousStatus = user.isActive;
@@ -848,6 +857,7 @@ router.patch('/users/:userId/status', auth, adminAuth, requireFullAdmin, async (
         });
         
         res.status(200).json({
+            success: true,
             message: `User ${user.isActive ? 'enabled' : 'disabled'} successfully`,
             isActive: user.isActive,
             username: user.username,
@@ -860,18 +870,25 @@ router.patch('/users/:userId/status', auth, adminAuth, requireFullAdmin, async (
         });
     } catch (error) {
         console.error('Error updating user status:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error', 
+            error: error.message 
+        });
     }
 });
 
-// DELETE a user (FULL ADMIN ONLY)
-router.delete('/users/:userId', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// DELETE a user (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.delete('/users/:userId', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
         const targetUserId = req.params.userId;
         const user = await User.findById(targetUserId);
         
         if (!user) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
         }
         
         // Store user info for logging before deletion
@@ -899,6 +916,7 @@ router.delete('/users/:userId', auth, adminAuth, requireFullAdmin, async (req, r
         });
         
         res.status(200).json({ 
+            success: true,
             message: 'User deleted successfully',
             deletedUser: {
                 username: deletedUserInfo.username,
@@ -913,12 +931,16 @@ router.delete('/users/:userId', auth, adminAuth, requireFullAdmin, async (req, r
         });
     } catch (error) {
         console.error('Error deleting user:', error);
-        res.status(500).json({ message: 'Server error', error: error.message });
+        res.status(500).json({ 
+            success: false,
+            message: 'Server error', 
+            error: error.message 
+        });
     }
 });
 
-// GET admin activity log (FULL ADMIN ONLY)
-router.get('/admin-logs', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// GET admin activity log (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.get('/admin-logs', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
@@ -977,8 +999,8 @@ router.get('/admin-logs', auth, adminAuth, requireFullAdmin, async (req, res) =>
     }
 });
 
-// GET top users with most sales in the past 6 days (FULL ADMIN ONLY)
-router.get('/top-sales-users', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// GET top users with most sales in the past 6 days (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.get('/top-sales-users', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
       // Calculate the date 6 days ago from today
       const sixDaysAgo = new Date();
@@ -1053,8 +1075,8 @@ router.get('/top-sales-users', auth, adminAuth, requireFullAdmin, async (req, re
     }
 });
   
-// POST reward top sales performers (FULL ADMIN ONLY)
-router.post('/reward-top-performers', auth, adminAuth, requireFullAdmin, async (req, res) => {
+// POST reward top sales performers (FULL ADMIN ONLY - EDITORS BLOCKED)
+router.post('/reward-top-performers', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
       const { percentages, description } = req.body;
       

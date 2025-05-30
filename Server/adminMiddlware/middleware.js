@@ -1,90 +1,149 @@
-// adminMiddleware/middleware.js
+// adminMiddleware/middleware.js - Updated version
 const jwt = require('jsonwebtoken');
 const { User } = require('../schema/schema'); 
 
 /**
  * Middleware to verify admin privileges
+ * Works with both scenarios: when auth middleware has run or standalone
  */
 module.exports = async function(req, res, next) {
   try {
-    // Check if req.user exists from previous middleware
-    if (!req.user) {
-      // If authMiddleware hasn't set req.user, we can check directly
-      const token = req.header('Authorization')?.replace('Bearer ', '');
+    console.log('🛡️ AdminAuth middleware started');
+    console.log('👤 Current req.user from auth middleware:', {
+      exists: !!req.user,
+      id: req.user?.id || req.user?._id,
+      username: req.user?.username,
+      role: req.user?.role
+    });
+
+    let user = req.user;
+
+    // If req.user doesn't exist or is incomplete, try to authenticate directly
+    if (!req.user || !req.user.role) {
+      console.log('🔄 Auth middleware didn\'t set req.user properly, authenticating directly...');
       
-      if (!token) {
+      const authHeader = req.headers.authorization || req.header('Authorization');
+      
+      if (!authHeader) {
+        console.error('❌ No authorization header found');
         return res.status(401).json({
           success: false,
           message: 'No authentication token, access denied'
         });
       }
       
-      // Verify token
-      const decoded = jwt.verify(token, 'Igetbysamtech');
+      // Extract token
+      const token = authHeader.startsWith('Bearer ') 
+        ? authHeader.slice(7) 
+        : authHeader.replace('Bearer ', '');
       
-      // Access userId from the decoded token (matching your auth routes structure)
-      const userId = decoded.userId;
-      
-      if (!userId) {
+      if (!token) {
+        console.error('❌ No token found in header');
         return res.status(401).json({
           success: false,
-          message: 'Invalid token structure'
+          message: 'No authentication token found'
         });
       }
       
-      // Check if user exists and has admin role
-      const user = await User.findById(userId).select('-password');
+      console.log('🎫 Token found, verifying...');
+      
+      // Verify token
+      let decoded;
+      try {
+        decoded = jwt.verify(token, 'Igetbysamtech');
+        console.log('✅ Token verified directly in admin middleware');
+        console.log('📄 Token structure:', Object.keys(decoded));
+      } catch (jwtError) {
+        console.error('❌ JWT verification failed:', jwtError.message);
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token',
+          error: jwtError.message
+        });
+      }
+      
+      // Get user ID from token - try different field names
+      const userId = decoded.userId || decoded.id || decoded._id;
+      
+      if (!userId) {
+        console.error('❌ No user ID found in token');
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token structure - no user ID found',
+          debug: 'Available fields: ' + Object.keys(decoded).join(', ')
+        });
+      }
+      
+      console.log('🔍 Looking up user with ID:', userId);
+      
+      // Get user from database
+      user = await User.findById(userId).select('-password');
       
       if (!user) {
+        console.error('❌ User not found in database');
         return res.status(401).json({
           success: false,
           message: 'User not found'
         });
       }
       
-      if (!user.isActive) {
-        return res.status(401).json({
-          success: false,
-          message: 'User account is deactivated'
-        });
-      }
-      
-      if (user.role !== 'admin') {
-        return res.status(403).json({
-          success: false,
-          message: 'Access denied: Admin privileges required'
-        });
-      }
-      
-      // Set req.user for downstream middleware and payload structure
-      req.user = user;
-      req.payload = {
+      console.log('✅ User found:', {
         id: user._id,
-        userId: user.id,
+        username: user.username,
         role: user.role
-      };
-    } else {
-      // If req.user is already set by authMiddleware
-      // Just check if user has admin role
-      if (req.user.role !== 'admin') {
-        return res.status(403).json({
-          success: false,
-          message: 'Access denied: Admin privileges required'
-        });
-      }
+      });
       
-      // Set payload structure for consistency
-      req.payload = {
-        id: req.user._id,
-        userId: req.user.id,
-        role: req.user.role
+      // Set req.user for downstream middleware
+      req.user = {
+        id: user._id,
+        _id: user._id,
+        userId: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        isActive: user.isActive
       };
     }
     
+    // Check if user account is active
+    if (!user.isActive) {
+      console.error('❌ User account is deactivated:', user.username);
+      return res.status(401).json({
+        success: false,
+        message: 'User account is deactivated'
+      });
+    }
+    
+    // Check if user has admin privileges (allow multiple admin roles)
+    const allowedRoles = ['admin', 'wallet_admin', 'Editor'];
+    
+    if (!allowedRoles.includes(user.role)) {
+      console.error('❌ User does not have admin privileges:', user.role);
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Admin privileges required',
+        yourRole: user.role,
+        allowedRoles: allowedRoles,
+        note: 'Only Admins, Wallet Admins, and Editors can access this resource'
+      });
+    }
+    
+    console.log('✅ Admin authentication successful:', {
+      username: user.username,
+      role: user.role
+    });
+    
+    // Set payload structure for consistency with your existing code
+    req.payload = {
+      id: user._id,
+      userId: user._id,
+      role: user.role
+    };
+    
     next();
   } catch (error) {
-    console.error('Admin auth middleware error:', error);
-    res.status(401).json({
+    console.error('💥 Admin auth middleware error:', error);
+    res.status(500).json({
       success: false,
       message: 'Admin authorization failed',
       error: error.message

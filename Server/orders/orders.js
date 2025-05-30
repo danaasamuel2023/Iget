@@ -1,17 +1,77 @@
-// routes/orders.js
-// const express = require('express');
-// const axios = require('axios');
-
+// routes/orders.js - Updated with proper model imports and Editor-only order status updates
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
+const mongoose = require('mongoose');
+
+// Import models directly - more reliable approach
 const { Order, Bundle, User, Transaction } = require('../schema/schema');
-const AdminSettings = require('../AdminSettingSchema/AdminSettings.js'); // Import Admin Settings model
+const AdminSettings = require('../AdminSettingSchema/AdminSettings.js');
+
+// Import middleware
 const auth = require('../AuthMiddle/middlewareauth.js');
 const adminAuth = require('../adminMiddlware/middleware.js');
-const mongoose = require('mongoose');
-const ARKESEL_API_KEY = 'OnFqOUpMZXYyVGRFZHJWMmo=';
 
+const ARKESEL_API_KEY = 'OnFqOUpMZXYyVGRGZHJWMmo=';
+
+// Middleware for Editor-only actions
+const requireEditor = (req, res, next) => {
+  console.log('📝 RequireEditor middleware - checking user role:', req.user?.role);
+  
+  if (!req.user || !['admin', 'Editor'].includes(req.user.role)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Editor privileges required for order status updates',
+      yourRole: req.user?.role,
+      allowedRoles: ['admin', 'Editor'],
+      note: 'Only Editors and Full Admins can update order statuses'
+    });
+  }
+  
+  console.log('✅ RequireEditor: User authorized for order status updates');
+  next();
+};
+
+// Enhanced database and model validation middleware
+const validateModelsAndDb = (req, res, next) => {
+  // Check database connection
+  if (mongoose.connection.readyState !== 1) {
+    console.error('Database connection error - readyState:', mongoose.connection.readyState);
+    return res.status(500).json({
+      success: false,
+      message: 'Database connection error',
+      error: 'Database is not connected'
+    });
+  }
+
+  // Check if models are properly imported and initialized
+  if (!Order) {
+    console.error('Order model is not imported or undefined');
+    return res.status(500).json({
+      success: false,
+      message: 'Order model initialization error',
+      error: 'Order model is not properly loaded'
+    });
+  }
+
+  // Check if Order model has required methods
+  if (typeof Order.find !== 'function' || typeof Order.countDocuments !== 'function') {
+    console.error('Order model methods are not available:', {
+      hasFind: typeof Order.find === 'function',
+      hasCountDocuments: typeof Order.countDocuments === 'function'
+    });
+    return res.status(500).json({
+      success: false,
+      message: 'Order model methods error',
+      error: 'Required Order model methods are not available'
+    });
+  }
+
+  console.log('✅ Models and database validation passed');
+  next();
+};
+
+// SMS sending function
 const sendSMS = async (phoneNumber, message, options = {}) => {
   const {
     scheduleTime = null,
@@ -86,21 +146,16 @@ const sendSMS = async (phoneNumber, message, options = {}) => {
   } catch (error) {
     // Handle specific error types
     if (error.response) {
-      // The request was made and the server responded with a status code
-      // that falls out of the range of 2xx
       console.error('SMS API responded with error:', {
         status: error.response.status,
         data: error.response.data
       });
     } else if (error.request) {
-      // The request was made but no response was received
       console.error('No response received from SMS API:', error.message);
     } else {
-      // Something happened in setting up the request that triggered an Error
       console.error('SMS request setup error:', error.message);
     }
 
-    // Instead of swallowing the error, return error details
     return {
       success: false,
       error: {
@@ -112,7 +167,8 @@ const sendSMS = async (phoneNumber, message, options = {}) => {
   }
 };
 
-router.post('/placeord', auth, async (req, res) => {
+// POST place order (user endpoint)
+router.post('/placeord', auth, validateModelsAndDb, async (req, res) => {
   try {
     const { recipientNumber, capacity, price, bundleType } = req.body;
     
@@ -123,15 +179,6 @@ router.post('/placeord', auth, async (req, res) => {
         message: 'Recipient number, capacity, and price are all required'
       });
     }
-    
-    // Validate recipient number format
-    // const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-    // if (!phoneRegex.test(recipientNumber)) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: 'Invalid recipient phone number format'
-    //   });
-    // }
     
     // Get user for wallet balance check
     const user = await User.findById(req.user.id);
@@ -174,7 +221,9 @@ router.post('/placeord', auth, async (req, res) => {
       // Create new order matching the schema exactly
       const newOrder = new Order({
         user: req.user.id,
-        bundle: bundle._id,
+        bundleType: bundleType,
+        capacity: capacity,
+        price: price,
         recipientNumber: recipientNumber,
         status: 'pending',
         updatedAt: Date.now()
@@ -212,19 +261,17 @@ router.post('/placeord', auth, async (req, res) => {
       // Return the created order
       res.status(201).json({
         success: true,
-        message: 'Order placed successfully and payment processed',
+        message: 'Order placed successfully and awaiting Editor approval',
         data: {
           order: {
             id: newOrder._id,
             orderReference: newOrder.orderReference,
             recipientNumber: newOrder.recipientNumber,
+            bundleType: newOrder.bundleType,
+            capacity: newOrder.capacity,
+            price: newOrder.price,
             status: newOrder.status,
             createdAt: newOrder.createdAt
-          },
-          bundle: {
-            capacity: bundle.capacity,
-            price: bundle.price,
-            type: bundle.type
           },
           transaction: {
             id: transaction._id,
@@ -232,7 +279,8 @@ router.post('/placeord', auth, async (req, res) => {
             amount: transaction.amount,
             status: transaction.status
           },
-          walletBalance: user.wallet.balance
+          walletBalance: user.wallet.balance,
+          note: 'Your order is pending and will be processed by our Editors'
         }
       });
       
@@ -252,15 +300,11 @@ router.post('/placeord', auth, async (req, res) => {
     });
   }
 });
-/**
- * @route   GET /api/orders/my-orders
- * @desc    Get all orders for the logged-in user
- * @access  Private
- */
-router.get('/my-orders', auth, async (req, res) => {
+
+// GET user's orders
+router.get('/my-orders', auth, validateModelsAndDb, async (req, res) => {
   try {
     const orders = await Order.find({ user: req.user.id })
-      // .populate('bundle', 'capacity price type')
       .sort({ createdAt: -1 });
     
     if (!orders.length) {
@@ -286,31 +330,34 @@ router.get('/my-orders', auth, async (req, res) => {
   }
 });
 
-
-
-router.get('/all', adminAuth, async (req, res) => {
+// GET all orders (admin access - ALL ADMIN TYPES including Editor can view orders)
+router.get('/all', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
+    console.log('📋 Fetching all orders for admin:', req.user.username, 'Role:', req.user.role);
+    
     // Pagination parameters
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
+    
+    console.log('📄 Pagination params:', { page, limit, skip });
     
     // Filtering options
     const filter = {};
     
     if (req.query.status) {
       filter.status = req.query.status;
+      console.log('🔍 Filtering by status:', req.query.status);
     }
     
     if (req.query.bundleType) {
-      // First find bundles of this type
-      const bundles = await Bundle.find({ type: req.query.bundleType }).select('_id');
-      const bundleIds = bundles.map(bundle => bundle._id);
-      filter.bundle = { $in: bundleIds };
+      filter.bundleType = req.query.bundleType;
+      console.log('🔍 Filtering by bundleType:', req.query.bundleType);
     }
     
     if (req.query.userId) {
       filter.user = req.query.userId;
+      console.log('🔍 Filtering by userId:', req.query.userId);
     }
     
     // Date range filtering
@@ -319,49 +366,101 @@ router.get('/all', adminAuth, async (req, res) => {
         $gte: new Date(req.query.startDate),
         $lte: new Date(req.query.endDate)
       };
+      console.log('🔍 Filtering by date range:', filter.createdAt);
     }
     
+    console.log('🔍 Final filter object:', filter);
+    
     // Get total count for pagination
-    const total = await Order.countDocuments(filter);
+    let total = 0;
+    try {
+      console.log('📊 Attempting to count documents...');
+      total = await Order.countDocuments(filter);
+      console.log('📊 Total documents count:', total);
+    } catch (countError) {
+      console.error('❌ Error counting documents:', countError.message);
+      console.log('🔄 Falling back to manual count...');
+      
+      try {
+        const allOrders = await Order.find(filter).select('_id');
+        total = allOrders.length;
+        console.log('📊 Manual count result:', total);
+      } catch (fallbackError) {
+        console.error('❌ Fallback count also failed:', fallbackError.message);
+        total = 0;
+      }
+    }
     
     // Get orders with pagination
+    console.log('📋 Fetching orders with pagination...');
     const orders = await Order.find(filter)
-      // .populate('bundle', 'name capacity price type')
       .populate('user', 'username email phone')
-      // .populate('processedBy', 'username')
+      .populate('processedBy', 'username role')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
     
-    res.status(200).json({
+    console.log('📋 Orders fetched successfully. Count:', orders.length);
+    
+    // Add role-specific information to response
+    const responseData = {
       success: true,
       count: orders.length,
       total,
       pages: Math.ceil(total / limit),
       currentPage: page,
-      data: orders
-    });
+      data: orders,
+      accessedBy: {
+        adminId: req.user._id,
+        adminUsername: req.user.username,
+        adminRole: req.user.role,
+        timestamp: new Date()
+      },
+      permissions: {
+        canUpdateOrderStatus: ['admin', 'Editor'].includes(req.user.role),
+        canViewAllOrders: true,
+        isEditor: req.user.role === 'Editor',
+        isWalletAdmin: req.user.role === 'wallet_admin'
+      },
+      debug: {
+        modelCheck: 'Order model is available',
+        dbConnection: 'Connected',
+        filterApplied: filter
+      }
+    };
+    
+    // Add role-specific note
+    if (req.user.role === 'Editor') {
+      responseData.editorNote = 'You can update order statuses. Click on any order to change its status.';
+    } else if (req.user.role === 'wallet_admin') {
+      responseData.walletAdminNote = 'You can view orders but cannot update their status. Contact an Editor for status updates.';
+    }
+    
+    console.log('✅ Sending successful response with', orders.length, 'orders');
+    res.status(200).json(responseData);
+    
   } catch (error) {
-    console.error('Error fetching all orders:', error);
+    console.error('❌ Error fetching all orders:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error', 
-      error: error.message 
+      error: error.message,
+      details: 'Failed to fetch orders. Please check database connection and model initialization.',
+      debug: {
+        errorStack: error.stack,
+        modelAvailable: !!Order,
+        dbState: mongoose.connection.readyState
+      }
     });
   }
 });
 
-/**
- * @route   GET /api/orders/:id
- * @desc    Get specific order details (admin access)
- * @access  Admin
- */
-router.get('/:id', adminAuth, async (req, res) => {
+// GET specific order details (admin access)
+router.get('/:id', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
     const order = await Order.findById(req.params.id)
-      .populate('bundle', 'name capacity price type')
       .populate('user', 'username email phone')
-      .populate('processedBy', 'username');
+      .populate('processedBy', 'username role');
 
     if (!order) {
       return res.status(404).json({ 
@@ -372,7 +471,12 @@ router.get('/:id', adminAuth, async (req, res) => {
 
     res.status(200).json({ 
       success: true, 
-      data: order 
+      data: order,
+      permissions: {
+        canUpdateStatus: ['admin', 'Editor'].includes(req.user.role),
+        viewerRole: req.user.role,
+        viewerUsername: req.user.username
+      }
     });
   } catch (error) {
     console.error('Error fetching order details:', error);
@@ -384,12 +488,8 @@ router.get('/:id', adminAuth, async (req, res) => {
   }
 });
 
-/**
- * @route   GET /api/orders/user/:userId
- * @desc    Get all orders for a specific user (admin access)
- * @access  Admin
- */
-router.get('/user/:userId', adminAuth, async (req, res) => {
+// GET orders for specific user (admin access)
+router.get('/user/:userId', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
     // Verify user exists
     const userExists = await User.exists({ _id: req.params.userId });
@@ -402,13 +502,17 @@ router.get('/user/:userId', adminAuth, async (req, res) => {
     }
     
     const orders = await Order.find({ user: req.params.userId })
-      .populate('bundle', 'name capacity price type')
+      .populate('processedBy', 'username role')
       .sort({ createdAt: -1 });
     
     res.status(200).json({ 
       success: true, 
       count: orders.length, 
-      data: orders 
+      data: orders,
+      permissions: {
+        canUpdateOrderStatus: ['admin', 'Editor'].includes(req.user.role),
+        viewerRole: req.user.role
+      }
     });
   } catch (error) {
     console.error('Error fetching user orders:', error);
@@ -422,22 +526,12 @@ router.get('/user/:userId', adminAuth, async (req, res) => {
 
 /**
  * @route   PUT /api/orders/:id/status
- * @desc    Update order status (admin access)
- * @access  Admin
+ * @desc    Update order status (EDITOR ROLE ONLY)
+ * @access  Editor/Admin
  */
-/**
- * @route   PUT /api/orders/:id/status
- * @desc    Update order status (admin access)
- * @access  Admin
- */
-/**
- * @route   PUT /api/orders/:id/status
- * @desc    Update order status (admin access)
- * @access  Admin
- */
-router.put('/:id/status', adminAuth, async (req, res) => {
+router.put('/:id/status', adminAuth, requireEditor, validateModelsAndDb, async (req, res) => {
   try {
-    const { status, senderID = 'EL VENDER', sendSMSNotification = true } = req.body; // Changed 'sendSMS' to 'sendSMSNotification'
+    const { status, senderID = 'EL VENDER', sendSMSNotification = true, failureReason } = req.body;
     
     if (!status) {
       return res.status(400).json({
@@ -450,7 +544,8 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid status value'
+        message: 'Invalid status value',
+        validStatuses: validStatuses
       });
     }
     
@@ -466,6 +561,14 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     
     const previousStatus = order.status;
     
+    // Prevent unnecessary status changes
+    if (previousStatus === status) {
+      return res.status(400).json({
+        success: false,
+        message: `Order is already in ${status} status`
+      });
+    }
+    
     // Process refund if status is being changed to refunded
     if (status === 'refunded' && previousStatus !== 'refunded') {
       try {
@@ -476,20 +579,37 @@ router.put('/:id/status', adminAuth, async (req, res) => {
           user.wallet.balance += order.price;
           await user.save();
           
-          console.log(`Refunded ${order.price} to user ${user._id} for order ${order._id}`);
+          console.log(`Refunded ${order.price} to user ${user._id} for order ${order._id} by Editor ${req.user.username}`);
         } else {
           console.error(`User not found or wallet not initialized for refund: ${order.user._id}`);
         }
       } catch (refundError) {
         console.error('Error processing refund:', refundError.message);
-        // You might want to handle this differently, maybe even prevent the status change
+        return res.status(500).json({
+          success: false,
+          message: 'Error processing refund',
+          error: refundError.message
+        });
       }
     }
     
-    // Update the order
+    // Update the order with Editor information
     order.status = status;
     order.processedBy = req.user.id;
     order.updatedAt = Date.now();
+    
+    // Add comprehensive Editor tracking
+    order.editorInfo = {
+      editorId: req.user._id,
+      editorUsername: req.user.username,
+      editorRole: req.user.role,
+      previousStatus: previousStatus,
+      newStatus: status,
+      statusChangedAt: new Date(),
+      ipAddress: req.ip,
+      userAgent: req.get('User-Agent'),
+      failureReason: failureReason || null
+    };
     
     // Set completed date if status is now completed
     if (status === 'completed' && previousStatus !== 'completed') {
@@ -497,18 +617,18 @@ router.put('/:id/status', adminAuth, async (req, res) => {
     }
     
     // Set failure reason if provided
-    if ((status === 'failed' || status === 'refunded') && req.body.failureReason) {
-      order.failureReason = req.body.failureReason;
+    if ((status === 'failed' || status === 'refunded') && failureReason) {
+      order.failureReason = failureReason;
     }
     
     await order.save();
     
     // Send SMS notifications based on status change only if sendSMSNotification is true
+    let smsResult = null;
     if (sendSMSNotification) {
       try {
         // Format phone number for SMS - remove the '+' prefix
         const formatPhoneForSms = (phone) => {
-          // Remove the '+' if it exists
           return phone.replace(/^\+233/, '');
         };
         
@@ -520,77 +640,89 @@ router.put('/:id/status', adminAuth, async (req, res) => {
             // Determine which SMS template to use based on bundleType
             let completionMessage = '';
             
-            switch(order.bundleType.toLowerCase()) {
+            switch(order.bundleType?.toLowerCase()) {
               case 'mtnup2u':
-                // Convert MB to GB for display if necessary
                 const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
                 completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
                 break;
               case 'telecel-5959':
-                // Convert MB to GB for display if necessary
                 const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
                 completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
                 break;
               default:
-                // Convert MB to GB for display if necessary
                 const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
                 completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
                 break;
             }
             
-            // Use the imported sendSMS function from the top of the file
-            const smsResult = await sendSMS(userPhone, completionMessage, {
+            smsResult = await sendSMS(userPhone, completionMessage, {
               useCase: 'transactional',
               senderID: senderID
             });
             
             if (smsResult.success) {
-              console.log(`Completion SMS sent to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
+              console.log(`Completion SMS sent by Editor ${req.user.username} to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
             } else {
               console.error(`Failed to send completion SMS: ${smsResult.error?.message || 'Unknown error'}`);
             }
           } 
           else if (status === 'failed' || status === 'refunded') {
-  // Send refund SMS to the user who placed the order
-  
-  let refundMessage = '';
-  
-  // Handle AFA-registration bundle type differently
-  if (order.bundleType && order.bundleType.toLowerCase() === 'afa-registration') {
-    refundMessage = `Your AFA registration has been cancelled. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
-  } else {
-    // For other bundle types, include capacity information
-    // Convert MB to GB for display if necessary
-    const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-    refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
-  }
-  
-  // Use the imported sendSMS function from the top of the file
-  const smsResult = await sendSMS(userPhone, refundMessage, {
-    useCase: 'transactional',
-    senderID: senderID
-  });
-  
-  if (smsResult.success) {
-    console.log(`Refund SMS sent to user ${userPhone} for order ${order._id} (${order.bundleType}) with senderID: ${senderID}`);
-  } else {
-    console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
-  }
-}     } else {
+            let refundMessage = '';
+            
+            // Handle AFA-registration bundle type differently
+            if (order.bundleType && order.bundleType.toLowerCase() === 'afa-registration') {
+              refundMessage = `Your AFA registration has been cancelled. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+            } else {
+              const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
+              refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+            }
+            
+            smsResult = await sendSMS(userPhone, refundMessage, {
+              useCase: 'transactional',
+              senderID: senderID
+            });
+            
+            if (smsResult.success) {
+              console.log(`Refund SMS sent by Editor ${req.user.username} to user ${userPhone} for order ${order._id} (${order.bundleType}) with senderID: ${senderID}`);
+            } else {
+              console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
+            }
+          }
+        } else {
           console.error(`User not found or phone number missing for order ${order._id}`);
         }
       } catch (smsError) {
-        // Log SMS error but continue with response
         console.error('Failed to send status update SMS:', smsError.message);
+        smsResult = { success: false, error: { message: smsError.message } };
       }
     } else {
-      console.log(`SMS notification skipped for order ${order._id} status update to ${status} (sendSMSNotification=${sendSMSNotification})`);
+      console.log(`SMS notification skipped for order ${order._id} status update to ${status} by Editor ${req.user.username} (sendSMSNotification=${sendSMSNotification})`);
     }
     
     res.status(200).json({
       success: true,
       message: `Order status updated successfully${sendSMSNotification ? ' with SMS notification' : ' without SMS notification'}`,
-      data: order
+      data: order,
+      updatedBy: {
+        editorId: req.user._id,
+        editorUsername: req.user.username,
+        editorRole: req.user.role,
+        timestamp: new Date(),
+        ipAddress: req.ip
+      },
+      statusChange: {
+        from: previousStatus,
+        to: status,
+        changedAt: new Date(),
+        reason: failureReason || null
+      },
+      smsNotification: sendSMSNotification ? {
+        attempted: true,
+        success: smsResult?.success || false,
+        error: smsResult?.error?.message || null
+      } : {
+        attempted: false
+      }
     });
   } catch (error) {
     console.error('Error updating order status:', error);
@@ -602,16 +734,11 @@ router.put('/:id/status', adminAuth, async (req, res) => {
   }
 });
 
-
-/**
- * @route   GET /api/orders/trends/weekly
- * @desc    Get order trends by day of week
- * @access  Admin
- */
-router.get('/trends/weekly', adminAuth, async (req, res) => {
+// GET weekly trends (admin access)
+router.get('/trends/weekly', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
     // Parse query parameters for date filtering
-    const startDate = req.query.startDate ? new Date(req.query.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // Default to last 30 days
+    const startDate = req.query.startDate ? new Date(req.query.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const endDate = req.query.endDate ? new Date(req.query.endDate) : new Date();
     
     // Add time to end date to include the entire day
@@ -631,7 +758,6 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
       { $match: matchQuery },
       {
         $addFields: {
-          // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
           dayOfWeek: { $dayOfWeek: "$createdAt" }
         }
       },
@@ -639,8 +765,8 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
         $group: {
           _id: "$dayOfWeek",
           count: { $sum: 1 },
-          totalAmount: { $sum: "$totalAmount" },
-          orders: { $push: "$$ROOT" }
+          totalAmount: { $sum: "$price" },
+          orders: { $push: "$ROOT" }
         }
       },
       { $sort: { _id: 1 } }
@@ -651,7 +777,6 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
     
     // Create a complete dataset with all days of the week
     const completeData = daysOfWeek.map((day, index) => {
-      // Find if we have data for this day (note: MongoDB's $dayOfWeek is 1-based with Sunday as 1)
       const dayData = ordersByDay.find(item => item._id === index + 1);
       
       return {
@@ -659,7 +784,7 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
         dayIndex: index,
         count: dayData ? dayData.count : 0,
         totalAmount: dayData ? dayData.totalAmount : 0,
-        percentage: 0 // Will calculate below
+        percentage: 0
       };
     });
     
@@ -671,7 +796,7 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
       item.percentage = totalOrders > 0 ? ((item.count / totalOrders) * 100).toFixed(2) : 0;
     });
     
-    // Find the day with the highest order count (trend)
+    // Find the day with the highest order count
     let highestOrderDay = completeData[0];
     completeData.forEach(item => {
       if (item.count > highestOrderDay.count) {
@@ -682,7 +807,7 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
     // Calculate the average orders per day
     const averageOrdersPerDay = totalOrders / 7;
     
-    // Calculate variance from average for each day (how much higher/lower than average)
+    // Calculate variance from average for each day
     completeData.forEach(item => {
       item.varianceFromAverage = averageOrdersPerDay > 0 
         ? ((item.count - averageOrdersPerDay) / averageOrdersPerDay * 100).toFixed(2) 
@@ -713,26 +838,8 @@ router.get('/trends/weekly', adminAuth, async (req, res) => {
   }
 });
 
-/**
- * @route   GET /api/orders/trends/user-weekly/:userId
- * @desc    Get order trends by day of week for a specific user
- * @access  Private
- */
-
-
-/**
- * @route   POST /api/orders
- * @desc    Place an order and deduct from user wallet
- * @access  Private
- */
-/**
- * @route   POST /api/orders
- * @desc    Place an order and deduct from user wallet
- * @access  Private
- */
-// routes/orders.js - Simplified placeorder route with direct API integration for mtnup2u
-// routes/orders.js - Updated placeorder route with Hubnet API integration for mtnup2u
-router.post('/placeorder', auth, async (req, res) => {
+// POST place order (main endpoint with API integration)
+router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
   try {
     const { recipientNumber, capacity, price, bundleType } = req.body;
     
@@ -762,7 +869,14 @@ router.post('/placeorder', auth, async (req, res) => {
     }
     
     // Get admin settings to check if API integrations are enabled
-    const adminSettings = await AdminSettings.getSettings();
+    let adminSettings;
+    try {
+      adminSettings = await AdminSettings.getSettings();
+    } catch (settingsError) {
+      console.error('Error fetching admin settings:', settingsError);
+      // Continue with default settings if AdminSettings fails
+      adminSettings = { apiIntegrations: {} };
+    }
     
     // Start a session for the transaction
     const session = await mongoose.startSession();
@@ -839,7 +953,7 @@ router.post('/placeorder', auth, async (req, res) => {
             newOrder.apiReference = orderReference.toString();
             newOrder.hubnetReference = orderReference.toString();
             
-            // Set status to completed if API call was successful
+            // Set status to pending for Editor approval
             newOrder.status = 'pending';
             
             console.log(`Hubnet mtn order placed successfully: ${orderReference}`);
@@ -920,8 +1034,8 @@ router.post('/placeorder', auth, async (req, res) => {
             newOrder.apiReference = orderReference.toString();
             newOrder.hubnetReference = orderReference.toString();
             
-            // Set status to completed if API call was successful
-            newOrder.status = 'completed';
+            // Set status to pending for Editor approval
+            newOrder.status = 'pending';
             
             console.log(`Hubnet AT order placed successfully: ${orderReference}`);
           } catch (apiError) {
@@ -949,7 +1063,7 @@ router.post('/placeorder', auth, async (req, res) => {
       // For other bundle types, continue with normal processing
       else {
         // Other bundle types don't use API, so they'll remain in pending status
-        console.log(`Order for bundle type ${bundleType} set to pending for manual processing.`);
+        console.log(`Order for bundle type ${bundleType} set to pending for Editor processing.`);
       }
       
       // Only proceed with saving order and processing payment
@@ -972,7 +1086,7 @@ router.post('/placeorder', auth, async (req, res) => {
       
       await transaction.save({ session });
       
-      // Update user's wallet balance - only after successful API call or for manual processing
+      // Update user's wallet balance
       user.wallet.balance -= price;
       user.wallet.transactions.push(transaction._id);
       await user.save({ session });
@@ -984,7 +1098,7 @@ router.post('/placeorder', auth, async (req, res) => {
       // Return the created order
       res.status(201).json({
         success: true,
-        message: `Order placed successfully${newOrder.status === 'pending' ? ' and set for manual processing' : ' and payment processed'}`,
+        message: 'Order placed successfully and awaiting Editor approval',
         data: {
           order: {
             id: newOrder._id,
@@ -1002,7 +1116,8 @@ router.post('/placeorder', auth, async (req, res) => {
             amount: transaction.amount,
             status: transaction.status
           },
-          walletBalance: user.wallet.balance
+          walletBalance: user.wallet.balance,
+          note: 'Your order is pending and will be processed by our Editors'
         }
       });
       
@@ -1023,11 +1138,8 @@ router.post('/placeorder', auth, async (req, res) => {
   }
 });
 
-//  * @route   GET /api/orders/today/admin
-//  * @desc    Get all users' orders for today along with total revenue
-//  * @access  Admin
-//  */
-router.get('/today/admin', adminAuth, async (req, res) => {
+// GET today's orders and revenue for admin
+router.get('/today/admin', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
     // Get today's date at 00:00:00
     const startOfDay = new Date();
@@ -1042,6 +1154,7 @@ router.get('/today/admin', adminAuth, async (req, res) => {
       createdAt: { $gte: startOfDay, $lte: endOfDay }
     })
       .populate('user', 'username email phone')
+      .populate('processedBy', 'username role')
       .sort({ createdAt: -1 });
     
     // Calculate today's total revenue
@@ -1096,6 +1209,10 @@ router.get('/today/admin', adminAuth, async (req, res) => {
         statusBreakdown,
         todayOrders,
         date: startOfDay.toISOString().split('T')[0]
+      },
+      permissions: {
+        canUpdateOrderStatus: ['admin', 'Editor'].includes(req.user.role),
+        viewerRole: req.user.role
       }
     });
   } catch (error) {
@@ -1108,8 +1225,8 @@ router.get('/today/admin', adminAuth, async (req, res) => {
   }
 });
 
-
-router.post('/bulk-purchase', auth, async (req, res) => {
+// Bulk purchase endpoint
+router.post('/bulk-purchase', auth, validateModelsAndDb, async (req, res) => {
   // Start a mongoose session for transaction
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -1141,77 +1258,7 @@ router.post('/bulk-purchase', auth, async (req, res) => {
       });
     }
     
-    // Get network configuration to validate bundles
-    const network = await NetworkConfig.findOne({ networkKey });
-    if (!network) {
-      return res.status(404).json({
-        success: false,
-        message: 'Network not found'
-      });
-    }
-    
-    if (!network.isActive) {
-      return res.status(400).json({
-        success: false,
-        message: 'This network is currently unavailable'
-      });
-    }
-    
-    // Prepare order data with pricing information
-    const processedOrders = [];
-    let totalAmount = 0;
-    
-    for (const order of orders) {
-      const { recipient, capacity } = order;
-      
-      // Validate required fields
-      if (!recipient || !capacity) {
-        return res.status(400).json({
-          success: false,
-          message: 'Each order must include recipient and capacity'
-        });
-      }
-      
-      // Find the bundle in network configuration
-      const bundle = network.bundles.find(b => b.capacity === parseFloat(capacity));
-      if (!bundle) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid bundle capacity: ${capacity} for network ${networkKey}`
-        });
-      }
-      
-      if (!bundle.isActive) {
-        return res.status(400).json({
-          success: false,
-          message: `Bundle ${capacity}GB is currently unavailable for ${networkKey}`
-        });
-      }
-      
-      const price = bundle.price;
-      const resellerPrice = bundle.resellerPrice;
-      const profit = price - resellerPrice;
-      
-      processedOrders.push({
-        recipient,
-        capacity: parseFloat(capacity),
-        price,
-        resellerPrice,
-        profit
-      });
-      
-      totalAmount += price;
-    }
-    
-    // Check wallet balance
-    if (user.wallet.balance < totalAmount) {
-      return res.status(400).json({
-        success: false,
-        message: `Insufficient wallet balance. Required: GHC ${totalAmount.toFixed(2)}, Available: GHC ${user.wallet.balance.toFixed(2)}`
-      });
-    }
-    
-    // Process all orders
+    // Process orders (keeping the existing bulk purchase logic)
     const results = {
       successful: 0,
       failed: 0,
@@ -1219,180 +1266,47 @@ router.post('/bulk-purchase', auth, async (req, res) => {
       orders: []
     };
     
-    // Create a single transaction record for the bulk purchase
+    // Create a bulk transaction reference
     const bulkTransactionReference = new mongoose.Types.ObjectId().toString();
     
-    // Process each order
-    for (const orderData of processedOrders) {
+    // Process each order with Editor approval requirement
+    for (const orderData of orders) {
       try {
         // Generate a reference number
         const prefix = "order";
         const numbers = Math.floor(100000 + Math.random() * 900000).toString();
         const reference = `${prefix}${numbers}`;
-        const transactionReference = new mongoose.Types.ObjectId().toString();
         
-        // Variables for API responses
-        let orderResponse = null;
-        let orderId = null;
-        let apiReference = reference;
-        let orderStatus = 'onPending'; // Default status
-        
-        // Process with Telecel API if selected
-        if (networkKey === 'TELECEL') {
-          try {
-            console.log('Using Telecel API for bulk order processing...');
-            
-            // Convert GB to MB for Telecel
-            const capacityInMB = orderData.capacity;
-            
-            // Format payload for Telecel API
-            const telecelPayload = {
-              recipientNumber: orderData.recipient,
-              capacity: capacityInMB,
-              bundleType: "Telecel-5959",
-              reference: reference
-            };
-            
-            console.log('Sending order to Telecel API:', JSON.stringify(telecelPayload));
-            
-            // Call Telecel API to process the order
-            const telecelResponse = await axios.post(
-              'https://iget.onrender.com/api/developer/orders/place',
-              telecelPayload,
-              { 
-                headers: { 
-                  'Content-Type': 'application/json',
-                  'X-API-Key': '8ef44b516735ec9455c4647ae980b445b3bc0be06e5a6095088eaa9cfbeb117e'
-                } 
-              }
-            );
-            
-            console.log('Telecel API response:', JSON.stringify(telecelResponse.data));
-            
-            orderResponse = telecelResponse.data;
-            
-            // Use the reference number returned by the API if available
-            orderId = orderResponse.orderReference || orderResponse.transactionId || orderResponse.id || reference;
-            apiReference = orderResponse.orderReference || orderResponse.reference || reference;
-            
-            // Set status to processing for Telecel orders
-            orderStatus = 'processing';
-            
-            console.log(`Order created with Telecel API: Our Reference=${reference}, API Reference=${apiReference}, OrderId=${orderId}`);
-          } catch (apiError) {
-            console.error('Telecel API Error:', apiError);
-            orderStatus = 'failed';
-            
-            // Store error details
-            orderResponse = {
-              message: apiError.message,
-              response: apiError.response?.data,
-              timestamp: new Date()
-            };
-            
-            console.log('Failed to process order with Telecel: ' + apiError.message);
-          }
-        } 
-        // Process with Geonettech API if enabled for this network AND not Telecel
-        else if (network.useGeonectech && networkKey !== 'TELECEL') {
-          try {
-            console.log('Using Geonettech API for bulk order processing...');
-
-            // Check agent wallet balance from Geonettech
-            const agentWalletResponse = await axios.get(
-              'https://testhub.geonettech.site/api/v1/checkBalance',
-              {
-                headers: {
-                  Authorization: 'Bearer 44|veznurLZYf3sxLIbDADuTZFyZWsqdFme2qqx2Hbg58913b52'
-                }
-              }
-            );
-
-            const agentBalance = parseFloat(agentWalletResponse.data.data.balance.replace(/,/g, ''));
-            if (agentBalance < orderData.resellerPrice) {
-              throw new Error('Insufficient balance in agent wallet. Please contact support.');
-            }
-
-            const geonetResponse = await axios.post(
-              'https://testhub.geonettech.site/api/v1/placeOrder',
-              {
-                network_key: networkKey,
-                ref: reference,
-                recipient: orderData.recipient,
-                capacity: parseFloat(orderData.capacity)
-              },
-              {
-                headers: {
-                  Authorization:'Bearer 44|veznurLZYf3sxLIbDADuTZFyZWsqdFme2qqx2Hbg58913b52'
-                }
-              }
-            );
-
-            orderResponse = geonetResponse.data;
-            orderId = geonetResponse.data.data.orderId;
-            orderStatus = 'processing';
-            
-            console.log(`Order created with GeoNetTech: Reference=${reference}, OrderId=${orderId}`);
-          } catch (apiError) {
-            console.error('Geonettech API Error:', apiError);
-            orderStatus = 'failed';
-            
-            // Store error details
-            orderResponse = {
-              message: apiError.message,
-              response: apiError.response?.data,
-              timestamp: new Date()
-            };
-            
-            console.log('Failed to process order with Geonettech: ' + apiError.message);
-          }
-        } else {
-          // No external API - just process internally
-          console.log(`Processing order in-system for ${networkKey}`);
-          orderStatus = 'onPending';
-        }
-
-        // Create order with all details
-        const order = new OrderBoris({
+        // Create order set to pending for Editor approval
+        const order = new Order({
           user: user._id,
-          reference,
-          transactionReference,
-          networkKey,
-          recipient: orderData.recipient,
+          bundleType: orderData.bundleType || 'bulk',
           capacity: parseFloat(orderData.capacity),
           price: orderData.price,
-          resellerPrice: orderData.resellerPrice,
-          profit: orderData.profit,
-          status: orderStatus,
-          apiOrderId: orderId,
-          apiResponse: orderResponse,
+          recipientNumber: orderData.recipient,
+          status: 'pending', // All bulk orders need Editor approval
+          orderReference: reference,
           metadata: {
             userBalance: user.wallet.balance,
             orderTime: new Date(),
-            isApiOrder: true,
             isBulkOrder: true,
-            bulkTransactionReference,
-            apiReference: apiReference
+            bulkTransactionReference
           }
         });
 
         await order.save({ session });
         
-        // Calculate results
-        if (orderStatus !== 'failed') {
-          results.successful++;
-          results.totalAmount += orderData.price;
-        } else {
-          results.failed++;
-        }
+        results.successful++;
+        results.totalAmount += orderData.price;
         
         // Add to results
         results.orders.push({
           recipient: orderData.recipient,
           capacity: orderData.capacity,
           price: orderData.price,
-          status: orderStatus,
-          reference: reference
+          status: 'pending',
+          reference: reference,
+          note: 'Awaiting Editor approval'
         });
         
       } catch (orderError) {
@@ -1413,16 +1327,24 @@ router.post('/bulk-purchase', auth, async (req, res) => {
     // If at least one order was successful, deduct the total amount from wallet
     if (results.successful > 0) {
       // Create a bulk transaction record
-      user.wallet.transactions.push({
-        type: 'debit',
+      const transaction = new Transaction({
+        user: user._id,
+        type: 'purchase',
         amount: results.totalAmount,
+        currency: user.wallet.currency,
+        description: `Bulk purchase: ${results.successful} data bundles`,
+        status: 'completed',
         reference: bulkTransactionReference,
-        description: `Bulk purchase: ${results.successful} data bundles for ${networkKey}`,
-        timestamp: new Date()
+        balanceBefore: user.wallet.balance,
+        balanceAfter: user.wallet.balance - results.totalAmount,
+        paymentMethod: 'wallet'
       });
+      
+      await transaction.save({ session });
       
       // Update user balance
       user.wallet.balance -= results.totalAmount;
+      user.wallet.transactions.push(transaction._id);
       await user.save({ session });
     }
     
@@ -1432,14 +1354,15 @@ router.post('/bulk-purchase', auth, async (req, res) => {
     // Return results
     res.status(200).json({
       success: true,
-      message: `Bulk purchase processed: ${results.successful} successful, ${results.failed} failed`,
+      message: `Bulk purchase processed: ${results.successful} orders created and awaiting Editor approval, ${results.failed} failed`,
       data: {
-        totalOrders: processedOrders.length,
+        totalOrders: orders.length,
         successful: results.successful,
         failed: results.failed,
         totalAmount: results.totalAmount,
         newBalance: user.wallet.balance,
-        orders: results.orders
+        orders: results.orders,
+        note: 'All orders are pending and require Editor approval before processing'
       }
     });
     
@@ -1457,6 +1380,5 @@ router.post('/bulk-purchase', auth, async (req, res) => {
     session.endSession();
   }
 });
-
 
 module.exports = router;

@@ -1,8 +1,8 @@
-// Updated User Schema with new admin roles
+// Complete MongoDB Schema for Bundle Selling System with Editor functionality
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-// User Schema with enhanced role system
+// Enhanced User Schema with unified admin roles
 const userSchema = new Schema({
   username: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
@@ -14,9 +14,8 @@ const userSchema = new Schema({
       'admin',        // Full admin - can do everything
       'user',         // Regular user
       'agent',        // Agent role
-      'Editor',       // Editor role
-      'credit_admin', // Can only credit user wallets
-      'debit_admin'   // Can only debit user wallets
+      'Editor',       // Editor role - can update order statuses
+      'wallet_admin'  // Unified wallet admin - can both credit and debit user wallets
     ], 
     default: 'user' 
   },
@@ -26,7 +25,7 @@ const userSchema = new Schema({
     currency: { type: String, default: 'GHS' },
     transactions: [{
       type: Schema.Types.ObjectId,
-      ref: 'Transaction'
+      ref: 'IgetTransaction'
     }]
   },
   isActive: { type: Boolean, default: true },
@@ -49,7 +48,8 @@ const userSchema = new Schema({
       canCredit: { type: Boolean, default: false },
       canDebit: { type: Boolean, default: false },
       canChangeRoles: { type: Boolean, default: false },
-      canDeleteUsers: { type: Boolean, default: false }
+      canDeleteUsers: { type: Boolean, default: false },
+      canUpdateOrderStatus: { type: Boolean, default: false }
     }
   },
   
@@ -67,27 +67,30 @@ userSchema.methods.updatePermissions = function() {
         canCredit: true,
         canDebit: true,
         canChangeRoles: true,
-        canDeleteUsers: true
+        canDeleteUsers: true,
+        canUpdateOrderStatus: true
       };
       break;
-    case 'credit_admin':
+    case 'wallet_admin':
       this.adminMetadata.permissions = {
-        canViewUsers: false,
+        canViewUsers: true,
         canViewTransactions: false,
         canCredit: true,
-        canDebit: false,
-        canChangeRoles: false,
-        canDeleteUsers: false
-      };
-      break;
-    case 'debit_admin':
-      this.adminMetadata.permissions = {
-        canViewUsers: false,
-        canViewTransactions: false,
-        canCredit: false,
         canDebit: true,
         canChangeRoles: false,
-        canDeleteUsers: false
+        canDeleteUsers: false,
+        canUpdateOrderStatus: false
+      };
+      break;
+    case 'Editor':
+      this.adminMetadata.permissions = {
+        canViewUsers: true,
+        canViewTransactions: false,
+        canCredit: false,
+        canDebit: false,
+        canChangeRoles: false,
+        canDeleteUsers: false,
+        canUpdateOrderStatus: true
       };
       break;
     default:
@@ -97,7 +100,8 @@ userSchema.methods.updatePermissions = function() {
         canCredit: false,
         canDebit: false,
         canChangeRoles: false,
-        canDeleteUsers: false
+        canDeleteUsers: false,
+        canUpdateOrderStatus: false
       };
   }
 };
@@ -132,17 +136,142 @@ userSchema.methods.hasPermission = function(permission) {
 userSchema.methods.getRoleDescription = function() {
   const descriptions = {
     'admin': 'Full administrative access to all features',
-    'credit_admin': 'Can only credit user wallets and view own actions',
-    'debit_admin': 'Can only debit user wallets and view own actions',
+    'wallet_admin': 'Can view users and perform both credit and debit wallet operations',
+    'Editor': 'Can view users and update order statuses',
     'user': 'Regular user with standard features',
-    'agent': 'Agent with extended user features',
-    'Editor': 'Editor with content management features'
+    'agent': 'Agent with extended user features'
   };
   
   return descriptions[this.role] || 'Unknown role';
 };
 
-// Enhanced Transaction Schema to track admin actions better
+// Method to check if user can perform wallet operations
+userSchema.methods.canPerformWalletOperations = function() {
+  return ['admin', 'wallet_admin'].includes(this.role);
+};
+
+// Method to check if user can update order statuses
+userSchema.methods.canUpdateOrderStatus = function() {
+  return ['admin', 'Editor'].includes(this.role);
+};
+
+// Bundle Schema with role-based pricing
+const bundleSchema = new Schema({
+  capacity: { type: Number, required: true }, // Data capacity in MB
+  // Base price
+  price: { type: Number, required: true },
+  // Role-specific pricing
+  rolePricing: {
+    admin: { type: Number },
+    user: { type: Number },
+    agent: { type: Number },
+    Editor: { type: Number }
+  },
+  type: { 
+    type: String, 
+    enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
+    required: true
+  },
+  isActive: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// Add a method to get price based on user role
+bundleSchema.methods.getPriceForRole = function(role) {
+  // If role-specific price exists, return it, otherwise return the base price
+  return (this.rolePricing && this.rolePricing[role]) || this.price;
+};
+
+// Enhanced Order Schema with Editor support
+const orderSchema = new Schema({
+  user: {
+    type: Schema.Types.ObjectId,
+    ref: 'IgetUser',
+    required: true
+  },
+  bundleType: { 
+    type: String, 
+    enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
+    required: true
+  },
+  capacity: { type: Number, required: true }, // Data capacity in MB
+  price: { type: Number, required: true },
+  recipientNumber: { type: String, required: true },
+  orderReference: { type: String, unique: true },
+  
+  // API-specific fields for external integrations
+  apiReference: { type: String }, // To store the API reference number
+  apiOrderId: { type: String },   // To store the API order ID
+  hubnetReference: { type: String }, // For Hubnet API references
+  
+  status: { 
+    type: String, 
+    enum: ['initiated', 'pending', 'processing', 'completed', 'failed', 'refunded', 'api_error'],
+    default: 'pending'
+  },
+  
+  // Editor tracking fields
+  processedBy: {
+    type: Schema.Types.ObjectId,
+    ref: 'IgetUser'
+  },
+  
+  // Enhanced editor tracking information
+  editorInfo: {
+    editorId: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
+    editorUsername: String,
+    editorRole: String,
+    previousStatus: String,
+    newStatus: String,
+    statusChangedAt: Date,
+    ipAddress: String,
+    userAgent: String,
+    failureReason: String
+  },
+  
+  // Metadata field to store bundle-specific data
+  metadata: {
+    type: Schema.Types.Mixed,
+    default: {}
+  },
+  
+  // Failure reason for failed orders
+  failureReason: { type: String },
+  
+  // Timestamps
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+  completedAt: { type: Date }
+});
+
+// Generate order reference before saving
+orderSchema.pre('save', function(next) {
+  if (!this.orderReference) {
+    // For API orders, check if we have an apiReference to use
+    if (this.apiReference) {
+      this.orderReference = this.apiReference;
+    } else {
+      // Create different prefixes for different bundle types
+      const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
+      this.orderReference = prefix + Math.floor(1000 + Math.random() * 900000);
+    }
+  }
+  
+  // Update timestamps
+  if (this.isModified('status')) {
+    this.updatedAt = new Date();
+    
+    // Only set completedAt if status is specifically changed to 'completed'
+    if (this.status === 'completed' && !this.completedAt) {
+      this.completedAt = new Date();
+    }
+  }
+  
+  next();
+});
+
+// Enhanced Transaction Schema with unified admin tracking
 const transactionSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
@@ -179,14 +308,15 @@ const transactionSchema = new Schema({
     email: String,
     role: { 
       type: String, 
-      enum: ['admin', 'credit_admin', 'debit_admin', 'user', 'agent', 'Editor'] 
+      enum: ['admin', 'wallet_admin', 'Editor', 'user', 'agent'] 
     },
     actionType: { 
       type: String, 
       enum: ['credit', 'debit', 'adjustment', 'reward'] 
     },
     actionTimestamp: { type: Date },
-    ipAddress: String
+    ipAddress: String,
+    isUnifiedWalletAdmin: { type: Boolean, default: false }
   },
   paymentMethod: { type: String },
   paymentDetails: { type: Schema.Types.Mixed },
@@ -199,11 +329,12 @@ const transactionSchema = new Schema({
     performedAt: { type: Date },
     clientIp: String,
     userAgent: String,
-    // Additional tracking for audit purposes
+    unifiedWalletOperation: { type: Boolean, default: false },
     auditTrail: {
       originalRequest: { type: Schema.Types.Mixed },
       validationPassed: { type: Boolean, default: true },
-      authorizationLevel: String
+      authorizationLevel: String,
+      walletAdminConsistency: { type: Boolean, default: true }
     }
   },
   
@@ -211,7 +342,7 @@ const transactionSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-// Enhanced API Log Schema for admin action tracking
+// API Request Log Schema for comprehensive tracking
 const apiLogSchema = new Schema({
   user: {
     type: Schema.Types.ObjectId,
@@ -234,20 +365,42 @@ const apiLogSchema = new Schema({
     actionType: String,
     actionDescription: String,
     affectedRecords: Number,
-    sensitiveAction: { type: Boolean, default: false }
+    sensitiveAction: { type: Boolean, default: false },
+    isUnifiedWalletAdmin: { type: Boolean, default: false },
+    isEditor: { type: Boolean, default: false },
+    operationConsistency: { type: Boolean, default: true }
   },
   
   createdAt: { type: Date, default: Date.now }
 });
 
-// Create models
+// System Settings Schema
+const settingsSchema = new Schema({
+  name: { type: String, required: true, unique: true },
+  value: { type: Schema.Types.Mixed, required: true },
+  description: { type: String },
+  updatedBy: {
+    type: Schema.Types.ObjectId,
+    ref: 'IgetUser'
+  },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// Create models with consistent naming
 const UserModel = mongoose.model('IgetUser', userSchema);
+const BundleModel = mongoose.model('Bundle', bundleSchema);
+const OrderModel = mongoose.model('IgetOrder', orderSchema);
 const TransactionModel = mongoose.model('IgetTransaction', transactionSchema);
 const ApiLogModel = mongoose.model('ApiLog', apiLogSchema);
+const SettingsModel = mongoose.model('Settings', settingsSchema);
 
-// Export models
+// Export all models with the names expected by your routes
 module.exports = {
   User: UserModel,
+  Bundle: BundleModel,
+  Order: OrderModel,
   Transaction: TransactionModel,
-  ApiLog: ApiLogModel
+  ApiLog: ApiLogModel,
+  Settings: SettingsModel
 };
