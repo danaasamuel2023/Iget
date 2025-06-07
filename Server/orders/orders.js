@@ -330,75 +330,277 @@ router.get('/my-orders', auth, validateModelsAndDb, async (req, res) => {
   }
 });
 
-// GET all orders (admin access - ALL ADMIN TYPES including Editor can view orders)
+// GET all orders (admin access) - UPDATED WITH FULL SERVER-SIDE SEARCH
 router.get('/all', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
     console.log('📋 Fetching all orders for admin:', req.user.username, 'Role:', req.user.role);
     
     // Pagination parameters
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    let limit = parseInt(req.query.limit) || 20;
+    
+    // If searching, increase limit to show more results
+    if (req.query.search && limit < 1000) {
+      limit = Math.min(parseInt(req.query.limit) || 1000, 1000);
+      console.log('🔍 Search mode: increased limit to', limit);
+    }
+    
     const skip = (page - 1) * limit;
     
     console.log('📄 Pagination params:', { page, limit, skip });
     
-    // Filtering options
+    // Build filter object
     const filter = {};
     
+    // Status filter
     if (req.query.status) {
       filter.status = req.query.status;
       console.log('🔍 Filtering by status:', req.query.status);
     }
     
+    // Bundle type filter
     if (req.query.bundleType) {
       filter.bundleType = req.query.bundleType;
       console.log('🔍 Filtering by bundleType:', req.query.bundleType);
     }
     
+    // User ID filter
     if (req.query.userId) {
       filter.user = req.query.userId;
       console.log('🔍 Filtering by userId:', req.query.userId);
     }
     
     // Date range filtering
-    if (req.query.startDate && req.query.endDate) {
-      filter.createdAt = {
-        $gte: new Date(req.query.startDate),
-        $lte: new Date(req.query.endDate)
-      };
-      console.log('🔍 Filtering by date range:', filter.createdAt);
+    if (req.query.startDate || req.query.endDate) {
+      filter.createdAt = {};
+      if (req.query.startDate) {
+        const startDate = new Date(req.query.startDate);
+        startDate.setHours(0, 0, 0, 0); // Set to beginning of day
+        filter.createdAt.$gte = startDate;
+      }
+      if (req.query.endDate) {
+        const endDate = new Date(req.query.endDate);
+        endDate.setHours(23, 59, 59, 999); // Set to end of day
+        filter.createdAt.$lte = endDate;
+      }
+      console.log('🔍 Filtering by date range:', {
+        start: filter.createdAt.$gte,
+        end: filter.createdAt.$lte
+      });
     }
     
-    console.log('🔍 Final filter object:', filter);
+    // Search query - searches across multiple fields
+    if (req.query.search) {
+      const searchQuery = req.query.search.trim();
+      console.log('🔍 Original search query:', searchQuery);
+      
+      // Build search conditions
+      const searchConditions = [];
+      
+      // Direct field searches
+      searchConditions.push(
+        { orderReference: { $regex: searchQuery, $options: 'i' } },
+        { recipientNumber: { $regex: searchQuery, $options: 'i' } },
+        { phoneNumber: { $regex: searchQuery, $options: 'i' } },
+        { 'metadata.fullName': { $regex: searchQuery, $options: 'i' } }
+      );
+      
+      // If search query looks like a phone number, also search with/without country code
+      if (/^\d+$/.test(searchQuery)) {
+        console.log('🔍 Detected phone number search');
+        
+        if (searchQuery.startsWith('0')) {
+          // If starts with 0, also search for 233 + rest
+          const withCountryCode = '233' + searchQuery.substring(1);
+          const withPlusCountryCode = '+233' + searchQuery.substring(1);
+          console.log('🔍 Also searching for:', withCountryCode, 'and', withPlusCountryCode);
+          
+          searchConditions.push(
+            { recipientNumber: withCountryCode },
+            { recipientNumber: withPlusCountryCode },
+            { phoneNumber: withCountryCode },
+            { phoneNumber: withPlusCountryCode }
+          );
+        } else if (searchQuery.startsWith('233')) {
+          // If starts with 233, also search for 0 + rest
+          const withoutCountryCode = '0' + searchQuery.substring(3);
+          const withPlus = '+' + searchQuery;
+          console.log('🔍 Also searching for:', withoutCountryCode, 'and', withPlus);
+          
+          searchConditions.push(
+            { recipientNumber: withoutCountryCode },
+            { recipientNumber: withPlus },
+            { phoneNumber: withoutCountryCode },
+            { phoneNumber: withPlus }
+          );
+        } else if (searchQuery.startsWith('+233')) {
+          // If starts with +233, also search for 0 + rest and 233 + rest
+          const withoutCountryCode = '0' + searchQuery.substring(4);
+          const withoutPlus = searchQuery.substring(1);
+          console.log('🔍 Also searching for:', withoutCountryCode, 'and', withoutPlus);
+          
+          searchConditions.push(
+            { recipientNumber: withoutCountryCode },
+            { recipientNumber: withoutPlus },
+            { phoneNumber: withoutCountryCode },
+            { phoneNumber: withoutPlus }
+          );
+        }
+      }
+      
+      // For ObjectId search (order ID) - Only add if it's a valid ObjectId format
+      if (searchQuery.length === 24 && /^[0-9a-fA-F]{24}$/.test(searchQuery)) {
+        console.log('🔍 Valid ObjectId search');
+        searchConditions.push({ _id: searchQuery });
+      }
+      
+      // Combine all search conditions with OR
+      filter.$or = searchConditions;
+      
+      console.log('🔍 Search conditions count:', searchConditions.length);
+      console.log('🔍 First few conditions:', searchConditions.slice(0, 3));
+    }
+    
+    // Capacity exclusions
+    if (req.query.excludedCapacities) {
+      const excluded = req.query.excludedCapacities.split(',').map(Number);
+      filter.capacity = { $nin: excluded };
+      console.log('🔍 Excluding capacities:', excluded);
+    }
+    
+    // Network exclusions (requires lookup)
+    if (req.query.excludedNetworks) {
+      const excludedNetworks = req.query.excludedNetworks.split(',');
+      const networkMap = {
+        'MTN': ['mtnup2u', 'mtn-justforu'],
+        'AirtelTigo': ['AT-ishare'],
+        'Telecel': ['Telecel-5959'],
+        'AfA': ['AfA-registration']
+      };
+      
+      const excludedBundleTypes = [];
+      excludedNetworks.forEach(network => {
+        if (networkMap[network]) {
+          excludedBundleTypes.push(...networkMap[network]);
+        }
+      });
+      
+      if (excludedBundleTypes.length > 0) {
+        if (filter.bundleType) {
+          // If there's already a bundleType filter, combine them
+          filter.bundleType = { $nin: excludedBundleTypes, $eq: filter.bundleType };
+        } else {
+          filter.bundleType = { $nin: excludedBundleTypes };
+        }
+      }
+      console.log('🔍 Excluding networks:', excludedNetworks);
+    }
+    
+    // Network-Capacity combination exclusions
+    if (req.query.excludedNetworkCapacities) {
+      const excludedCombos = req.query.excludedNetworkCapacities.split(',');
+      console.log('🔍 Excluding network-capacity combos:', excludedCombos);
+      // This is complex to handle in MongoDB query, might need post-processing
+    }
+    
+    // First, get users if we need to search by user fields
+    if (req.query.search) {
+      try {
+        const searchRegex = new RegExp(req.query.search, 'i');
+        const users = await User.find({
+          $or: [
+            { username: searchRegex },
+            { email: searchRegex },
+            { phone: searchRegex }
+          ]
+        }).select('_id');
+        
+        if (users.length > 0) {
+          const userIds = users.map(u => u._id);
+          console.log('🔍 Found', users.length, 'matching users');
+          if (filter.$or) {
+            filter.$or.push({ user: { $in: userIds } });
+          } else {
+            filter.$or = [{ user: { $in: userIds } }];
+          }
+        }
+      } catch (userSearchError) {
+        console.log('⚠️ User search error (non-critical):', userSearchError.message);
+      }
+    }
     
     // Get total count for pagination
     let total = 0;
     try {
-      console.log('📊 Attempting to count documents...');
+      console.log('📊 Counting documents with filter...');
       total = await Order.countDocuments(filter);
       console.log('📊 Total documents count:', total);
     } catch (countError) {
       console.error('❌ Error counting documents:', countError.message);
-      console.log('🔄 Falling back to manual count...');
-      
-      try {
-        const allOrders = await Order.find(filter).select('_id');
-        total = allOrders.length;
-        console.log('📊 Manual count result:', total);
-      } catch (fallbackError) {
-        console.error('❌ Fallback count also failed:', fallbackError.message);
-        total = 0;
-      }
+      total = 0;
     }
     
     // Get orders with pagination
     console.log('📋 Fetching orders with pagination...');
-    const orders = await Order.find(filter)
+    
+    // When searching, don't sort by date to ensure we get the most relevant results
+    const sortOptions = req.query.search ? {} : { createdAt: -1 };
+    
+    let orders = await Order.find(filter)
       .populate('user', 'username email phone')
       .populate('processedBy', 'username role')
-      .sort({ createdAt: -1 })
+      .sort(sortOptions)
       .skip(skip)
       .limit(limit);
+    
+    console.log('📋 Initial fetch returned', orders.length, 'orders');
+    
+    // Debug: Show a sample of what was found
+    if (orders.length > 0 && req.query.search) {
+      console.log('🔍 Sample of fetched orders:');
+      orders.slice(0, 3).forEach(order => {
+        console.log(`  - Order ${order._id}: recipient=${order.recipientNumber}, phone=${order.phoneNumber}, ref=${order.orderReference}`);
+      });
+    }
+    
+    // Post-query filtering for partial order ID search
+    if (req.query.search && req.query.search.length >= 6 && req.query.search.length < 24) {
+      const partialId = req.query.search.toLowerCase();
+      // ONLY apply partial ID filter if it's a hex string (not a phone number)
+      if (/^[0-9a-fA-F]+$/.test(partialId) && !/^[0-9]+$/.test(partialId)) {
+        console.log('🔍 Applying partial ID filter:', partialId);
+        const originalCount = orders.length;
+        orders = orders.filter(order => 
+          order._id.toString().toLowerCase().startsWith(partialId)
+        );
+        if (orders.length !== originalCount) {
+          console.log('🔍 Partial ID filter reduced results from', originalCount, 'to', orders.length);
+          // Update total for accurate pagination
+          const allOrders = await Order.find(filter).select('_id');
+          total = allOrders.filter(order => 
+            order._id.toString().toLowerCase().startsWith(partialId)
+          ).length;
+        }
+      }
+    }
+    
+    // Post-query filtering for network-capacity exclusions
+    if (req.query.excludedNetworkCapacities) {
+      const excludedCombos = req.query.excludedNetworkCapacities.split(',');
+      const networkMap = {
+        'mtnup2u': 'MTN',
+        'mtn-justforu': 'MTN',
+        'AT-ishare': 'AirtelTigo',
+        'Telecel-5959': 'Telecel',
+        'AfA-registration': 'AfA'
+      };
+      
+      orders = orders.filter(order => {
+        const network = networkMap[order.bundleType] || 'Unknown';
+        const combo = `${network}-${order.capacity}GB`;
+        return !excludedCombos.includes(combo);
+      });
+    }
     
     console.log('📋 Orders fetched successfully. Count:', orders.length);
     
@@ -421,11 +623,6 @@ router.get('/all', adminAuth, validateModelsAndDb, async (req, res) => {
         canViewAllOrders: true,
         isEditor: req.user.role === 'Editor',
         isWalletAdmin: req.user.role === 'wallet_admin'
-      },
-      debug: {
-        modelCheck: 'Order model is available',
-        dbConnection: 'Connected',
-        filterApplied: filter
       }
     };
     
@@ -445,12 +642,7 @@ router.get('/all', adminAuth, validateModelsAndDb, async (req, res) => {
       success: false, 
       message: 'Server error', 
       error: error.message,
-      details: 'Failed to fetch orders. Please check database connection and model initialization.',
-      debug: {
-        errorStack: error.stack,
-        modelAvailable: !!Order,
-        dbState: mongoose.connection.readyState
-      }
+      details: 'Failed to fetch orders. Please check database connection and model initialization.'
     });
   }
 });
