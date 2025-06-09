@@ -1031,6 +1031,9 @@ router.get('/trends/weekly', adminAuth, validateModelsAndDb, async (req, res) =>
 });
 
 // POST place order (main endpoint with API integration)
+// POST place order (main endpoint with API integration and stock validation)
+// Replace the existing /placeorder endpoint in your routes/orders.js with this updated version
+
 router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
   try {
     const { recipientNumber, capacity, price, bundleType } = req.body;
@@ -1040,6 +1043,33 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Recipient number, capacity, price, and bundle type are all required'
+      });
+    }
+    
+    // CHECK IF THE BUNDLE IS IN STOCK - NEW STOCK VALIDATION
+    const bundle = await Bundle.findOne({
+      capacity: capacity,
+      type: bundleType,
+      isActive: true
+    });
+    
+    if (bundle && (bundle.stockStatus?.isOutOfStock || !bundle.isInStock)) {
+      return res.status(400).json({
+        success: false,
+        message: `This bundle (${capacity}MB ${bundleType}) is currently out of stock`,
+        stockInfo: {
+          reason: bundle.stockStatus?.reason || 'No reason provided',
+          markedOutAt: bundle.stockStatus?.markedOutOfStockAt
+        }
+      });
+    }
+    
+    // If bundle doesn't exist but we're creating orders dynamically, check if we should block it
+    if (!bundle && req.user.role !== 'admin') {
+      // For non-admin users, we might want to prevent creating new bundle types on the fly
+      return res.status(400).json({
+        success: false,
+        message: 'This bundle configuration is not available'
       });
     }
     
@@ -1134,6 +1164,8 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
             
             if (!hubnetResponse.ok) {
               console.error('Hubnet order failed:', hubnetData);
+              await session.abortTransaction();
+              session.endSession();
               return res.status(400).json({
                 success: false,
                 message: 'Hubnet API purchase failed. No payment has been processed.',
@@ -1156,6 +1188,8 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
               console.error('Response data:', apiError.response.data);
             }
             
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({
               success: false,
               message: 'Hubnet API connection error. No payment has been processed.',
@@ -1215,6 +1249,8 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
             
             if (!hubnetResponse.ok) {
               console.error('Hubnet order failed:', hubnetData);
+              await session.abortTransaction();
+              session.endSession();
               return res.status(400).json({
                 success: false,
                 message: 'Hubnet API purchase failed. No payment has been processed.',
@@ -1237,6 +1273,8 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
               console.error('Response data:', apiError.response.data);
             }
             
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({
               success: false,
               message: 'Hubnet API connection error. No payment has been processed.',
@@ -1329,7 +1367,6 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
     });
   }
 });
-
 // GET today's orders and revenue for admin
 router.get('/today/admin', adminAuth, validateModelsAndDb, async (req, res) => {
   try {

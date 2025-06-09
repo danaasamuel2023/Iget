@@ -155,7 +155,7 @@ userSchema.methods.canUpdateOrderStatus = function() {
   return ['admin', 'Editor'].includes(this.role);
 };
 
-// Bundle Schema with role-based pricing
+// Bundle Schema with role-based pricing and stock management
 const bundleSchema = new Schema({
   capacity: { type: Number, required: true }, // Data capacity in MB
   // Base price
@@ -172,6 +172,18 @@ const bundleSchema = new Schema({
     enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
     required: true
   },
+  
+  // Stock management fields
+  isInStock: { type: Boolean, default: true }, // Whether this bundle is in stock
+  stockStatus: {
+    isOutOfStock: { type: Boolean, default: false },
+    reason: { type: String }, // Reason for being out of stock
+    markedOutOfStockBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
+    markedOutOfStockAt: { type: Date },
+    markedInStockBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
+    markedInStockAt: { type: Date }
+  },
+  
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -181,6 +193,11 @@ const bundleSchema = new Schema({
 bundleSchema.methods.getPriceForRole = function(role) {
   // If role-specific price exists, return it, otherwise return the base price
   return (this.rolePricing && this.rolePricing[role]) || this.price;
+};
+
+// Add method to check if bundle is available for purchase
+bundleSchema.methods.isAvailableForPurchase = function() {
+  return this.isActive && this.isInStock && !this.stockStatus.isOutOfStock;
 };
 
 // Enhanced Order Schema with Editor support

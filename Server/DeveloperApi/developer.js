@@ -1,62 +1,12 @@
-// routes/api.js
+// routes/api.js - Updated with stock validation
 const express = require('express');
 const router = express.Router();
 const { Order, User, Transaction, Bundle } = require('../schema/schema');
 const apiAuth = require('../middlewareApi/ApiAuth');
 const { ApiLog } = require('../schema/schema');
 const mongoose = require('mongoose');
-const AdminSettings = require('../AdminSettingSchema/AdminSettings.js'); // Import Admin Settings model
+const AdminSettings = require('../AdminSettingSchema/AdminSettings.js');
 
-
-/**
- * API Request Logger Middleware
- * Logs API requests with request/response details
- */
-// const apiLogger = async (req, res, next) => {
-//   // Store original send function
-//   const originalSend = res.send;
-  
-//   // Start time for execution time calculation
-//   const startTime = Date.now();
-  
-//   // Override send function to capture response data
-//   res.send = function(data) {
-//     const responseData = JSON.parse(data);
-//     const executionTime = Date.now() - startTime;
-    
-//     // Create log entry
-//     const logEntry = new ApiLog({
-//       user: req.user ? req.user.id : null,
-//       apiKey: req.header('X-API-Key'),
-//       endpoint: req.originalUrl,
-//       method: req.method,
-//       requestData: {
-//         body: req.body,
-//         params: req.params,
-//         query: req.query
-//       },
-//       responseData: responseData,
-//       ipAddress: req.ip,
-//       status: res.statusCode,
-//       executionTime: executionTime
-//     });
-    
-//     // Save log entry (don't await to avoid delaying response)
-//     logEntry.save().catch(err => console.error('Error saving API log:', err));
-    
-//     // Call original send function
-//     originalSend.call(this, data);
-//     return this;
-//   };
-  
-//   next();
-// };
-
-/**
- * @route   POST /api/v1/orders/place
- * @desc    Place an order using API key auth
- * @access  Private (API Key)
- */
 /**
  * @route   POST /api/v1/orders/place
  * @desc    Place an order using API key auth
@@ -85,6 +35,18 @@ router.post('/orders/place', apiAuth, async (req, res) => {
       return res.status(404).json({
         success: false,
         message: `No active bundle found matching type ${bundleType} with capacity ${capacity}MB`
+      });
+    }
+    
+    // CHECK STOCK STATUS - NEW VALIDATION
+    if (bundle.stockStatus?.isOutOfStock || bundle.isInStock === false) {
+      return res.status(400).json({
+        success: false,
+        message: `This bundle (${capacity}MB ${bundleType}) is currently out of stock`,
+        stockInfo: {
+          reason: bundle.stockStatus?.reason || 'No reason provided',
+          markedOutAt: bundle.stockStatus?.markedOutOfStockAt
+        }
       });
     }
     
@@ -175,9 +137,11 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             
             if (!hubnetResponse.ok) {
               console.error('Hubnet order failed:', hubnetData);
+              await session.abortTransaction();
+              session.endSession();
               return res.status(400).json({
                 success: false,
-                message: 'purchase failed. No payment has been processed.',
+                message: 'Purchase failed. No payment has been processed.',
                 error: hubnetData.message || 'Unknown error'
               });
             }
@@ -197,9 +161,11 @@ router.post('/orders/place', apiAuth, async (req, res) => {
               console.error('Response data:', apiError.response.data);
             }
             
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({
               success: false,
-              message: ' connection error. No payment has been processed.',
+              message: 'Connection error. No payment has been processed.',
               error: apiError.message,
               details: apiError.response?.data || 'Connection error'
             });
@@ -256,9 +222,11 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             
             if (!hubnetResponse.ok) {
               console.error('Hubnet order failed:', hubnetData);
+              await session.abortTransaction();
+              session.endSession();
               return res.status(400).json({
                 success: false,
-                message: ' purchase failed. No payment has been processed.',
+                message: 'Purchase failed. No payment has been processed.',
                 error: hubnetData.message || 'Unknown error'
               });
             }
@@ -278,9 +246,11 @@ router.post('/orders/place', apiAuth, async (req, res) => {
               console.error('Response data:', apiError.response.data);
             }
             
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({
               success: false,
-              message: ' connection error. No payment has been processed.',
+              message: 'Connection error. No payment has been processed.',
               error: apiError.message,
               details: apiError.response?.data || 'Connection error'
             });
@@ -369,6 +339,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
     });
   }
 });
+
 /**
  * @route   GET /api/v1/orders/reference/:orderRef
  * @desc    Get order details by order reference
