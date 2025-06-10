@@ -42,7 +42,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
     if (bundle.stockStatus?.isOutOfStock || bundle.isInStock === false) {
       return res.status(400).json({
         success: false,
-        message: `This bundle (${capacity}MB ${bundleType}) is currently out of stock`,
+        message: `This bundle (${capacity}GB ${bundleType}) is currently out of stock`,
         stockInfo: {
           reason: bundle.stockStatus?.reason || 'No reason provided',
           markedOutAt: bundle.stockStatus?.markedOutOfStockAt
