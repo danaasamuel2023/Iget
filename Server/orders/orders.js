@@ -1,4 +1,4 @@
-// routes/orders.js - Updated with proper model imports and Editor-only order status updates
+// routes/orders.js - Updated with bulk status endpoint
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
@@ -165,6 +165,32 @@ const sendSMS = async (phoneNumber, message, options = {}) => {
       }
     };
   }
+};
+
+// Helper function to generate SMS message based on order status and type
+const generateSMSMessage = (order, status, bundleType) => {
+  const formatDataSize = (capacity) => {
+    return capacity >= 1000 ? `${capacity/1000}GB` : `${capacity}GB`;
+  };
+  
+  if (status === 'completed') {
+    switch(bundleType?.toLowerCase()) {
+      case 'mtnup2u':
+        return `${formatDataSize(order.capacity)} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
+      case 'telecel-5959':
+        return `${formatDataSize(order.capacity)} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
+      default:
+        return `${formatDataSize(order.capacity)} has been sent to ${order.recipientNumber}.\niGet`;
+    }
+  } else if (status === 'failed' || status === 'refunded') {
+    if (bundleType?.toLowerCase() === 'afa-registration') {
+      return `Your AFA registration has been cancelled. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+    } else {
+      return `Your ${formatDataSize(order.capacity)} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
+    }
+  }
+  
+  return null;
 };
 
 // POST place order (user endpoint)
@@ -827,57 +853,18 @@ router.put('/:id/status', adminAuth, requireEditor, validateModelsAndDb, async (
         // Get the user's phone who placed the order
         if (order.user && order.user.phone) {
           const userPhone = formatPhoneForSms(order.user.phone);
+          const message = generateSMSMessage(order, status, order.bundleType);
           
-          if (status === 'completed' && previousStatus !== 'completed') {
-            // Determine which SMS template to use based on bundleType
-            let completionMessage = '';
-            
-            switch(order.bundleType?.toLowerCase()) {
-              case 'mtnup2u':
-                const dataAmount = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-                completionMessage = `${dataAmount} has been credited to ${order.recipientNumber} and is valid for 3 months.`;
-                break;
-              case 'telecel-5959':
-                const dataSizeGB = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-                completionMessage = `${dataSizeGB} has been allocated to ${order.recipientNumber} and is valid for 2 months.`;
-                break;
-              default:
-                const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-                completionMessage = `${dataSize} has been sent to ${order.recipientNumber}.\niGet`;
-                break;
-            }
-            
-            smsResult = await sendSMS(userPhone, completionMessage, {
+          if (message) {
+            smsResult = await sendSMS(userPhone, message, {
               useCase: 'transactional',
               senderID: senderID
             });
             
             if (smsResult.success) {
-              console.log(`Completion SMS sent by Editor ${req.user.username} to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
+              console.log(`SMS sent by Editor ${req.user.username} to user ${userPhone} for order ${order._id} using ${order.bundleType} template with senderID: ${senderID}`);
             } else {
-              console.error(`Failed to send completion SMS: ${smsResult.error?.message || 'Unknown error'}`);
-            }
-          } 
-          else if (status === 'failed' || status === 'refunded') {
-            let refundMessage = '';
-            
-            // Handle AFA-registration bundle type differently
-            if (order.bundleType && order.bundleType.toLowerCase() === 'afa-registration') {
-              refundMessage = `Your AFA registration has been cancelled. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
-            } else {
-              const dataSize = order.capacity >= 1000 ? `${order.capacity/1000}GB` : `${order.capacity}GB`;
-              refundMessage = `Your ${dataSize} order to ${order.recipientNumber} failed. The amount has been reversed to your iGet balance. Kindly check your iGet balance to confirm.\niGet`;
-            }
-            
-            smsResult = await sendSMS(userPhone, refundMessage, {
-              useCase: 'transactional',
-              senderID: senderID
-            });
-            
-            if (smsResult.success) {
-              console.log(`Refund SMS sent by Editor ${req.user.username} to user ${userPhone} for order ${order._id} (${order.bundleType}) with senderID: ${senderID}`);
-            } else {
-              console.error(`Failed to send refund SMS: ${smsResult.error?.message || 'Unknown error'}`);
+              console.error(`Failed to send SMS: ${smsResult.error?.message || 'Unknown error'}`);
             }
           }
         } else {
@@ -923,6 +910,222 @@ router.put('/:id/status', adminAuth, requireEditor, validateModelsAndDb, async (
       message: 'Server error',
       error: error.message
     });
+  }
+});
+
+/**
+ * @route   PUT /api/orders/bulk-status
+ * @desc    Bulk update order statuses (EDITOR ROLE ONLY)
+ * @access  Editor/Admin
+ */
+router.put('/bulk-status', adminAuth, requireEditor, validateModelsAndDb, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const { orderIds, status, senderID = 'EL VENDER', sendSMSNotification = false } = req.body;
+    
+    // Validation
+    if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order IDs array is required and cannot be empty'
+      });
+    }
+    
+    if (orderIds.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Maximum 500 orders can be updated at once'
+      });
+    }
+    
+    const validStatuses = ['pending', 'processing', 'completed', 'failed', 'refunded'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid status is required',
+        validStatuses: validStatuses
+      });
+    }
+    
+    console.log(`📝 Bulk status update initiated by Editor ${req.user.username} for ${orderIds.length} orders to status: ${status}`);
+    
+    // Get all orders that need to be updated
+    const ordersToUpdate = await Order.find({ 
+      _id: { $in: orderIds } 
+    }).populate('user').session(session);
+    
+    if (ordersToUpdate.length === 0) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'No valid orders found with provided IDs'
+      });
+    }
+    
+    // Process refunds if status is 'refunded'
+    const refundResults = [];
+    if (status === 'refunded') {
+      for (const order of ordersToUpdate) {
+        if (order.status !== 'refunded' && order.user) {
+          try {
+            const user = await User.findById(order.user._id).session(session);
+            if (user && user.wallet) {
+              user.wallet.balance += order.price;
+              await user.save({ session });
+              refundResults.push({
+                orderId: order._id,
+                userId: user._id,
+                amount: order.price,
+                success: true
+              });
+            }
+          } catch (refundError) {
+            console.error(`Failed to refund order ${order._id}:`, refundError);
+            refundResults.push({
+              orderId: order._id,
+              success: false,
+              error: refundError.message
+            });
+          }
+        }
+      }
+    }
+    
+    // Prepare bulk update operations
+    const bulkOps = orderIds.map(orderId => ({
+      updateOne: {
+        filter: { _id: orderId },
+        update: {
+          $set: {
+            status: status,
+            processedBy: req.user.id,
+            updatedAt: Date.now(),
+            editorInfo: {
+              editorId: req.user._id,
+              editorUsername: req.user.username,
+              editorRole: req.user.role,
+              statusChangedAt: new Date(),
+              bulkUpdate: true,
+              totalInBatch: orderIds.length
+            },
+            ...(status === 'completed' ? { completedAt: new Date() } : {})
+          }
+        }
+      }
+    }));
+    
+    // Execute bulk update
+    const bulkResult = await Order.bulkWrite(bulkOps, { session });
+    
+    // Commit transaction
+    await session.commitTransaction();
+    
+    console.log(`✅ Bulk update completed: ${bulkResult.modifiedCount} orders updated`);
+    
+    // Handle SMS notifications asynchronously if enabled
+    if (sendSMSNotification && bulkResult.modifiedCount > 0) {
+      // Process SMS in background to not delay response
+      setImmediate(async () => {
+        try {
+          console.log('📱 Starting background SMS notifications...');
+          
+          const updatedOrders = await Order.find({ 
+            _id: { $in: orderIds } 
+          }).populate('user');
+          
+          let smsSuccessCount = 0;
+          let smsFailureCount = 0;
+          
+          // Send SMS in batches to avoid overwhelming the SMS API
+          const smsBatchSize = 10;
+          for (let i = 0; i < updatedOrders.length; i += smsBatchSize) {
+            const batch = updatedOrders.slice(i, i + smsBatchSize);
+            
+            const smsPromises = batch.map(async (order) => {
+              if (order.user?.phone) {
+                try {
+                  const userPhone = order.user.phone.replace(/^\+233/, '');
+                  const message = generateSMSMessage(order, status, order.bundleType);
+                  
+                  if (message) {
+                    const result = await sendSMS(userPhone, message, {
+                      useCase: 'transactional',
+                      senderID: senderID
+                    });
+                    
+                    if (result.success) {
+                      smsSuccessCount++;
+                    } else {
+                      smsFailureCount++;
+                    }
+                  }
+                } catch (error) {
+                  smsFailureCount++;
+                  console.error(`SMS error for order ${order._id}:`, error.message);
+                }
+              }
+            });
+            
+            await Promise.all(smsPromises);
+            
+            // Small delay between batches to avoid rate limiting
+            if (i + smsBatchSize < updatedOrders.length) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+          
+          console.log(`📱 SMS notifications completed: ${smsSuccessCount} sent, ${smsFailureCount} failed`);
+          
+        } catch (smsError) {
+          console.error('Background SMS processing error:', smsError);
+        }
+      });
+    }
+    
+    // Return response immediately
+    res.status(200).json({
+      success: true,
+      message: `Successfully updated ${bulkResult.modifiedCount} orders`,
+      data: {
+        requested: orderIds.length,
+        found: ordersToUpdate.length,
+        modified: bulkResult.modifiedCount,
+        status: status,
+        refunds: refundResults.length > 0 ? {
+          attempted: refundResults.length,
+          successful: refundResults.filter(r => r.success).length,
+          failed: refundResults.filter(r => !r.success).length,
+          totalRefunded: refundResults
+            .filter(r => r.success)
+            .reduce((sum, r) => sum + r.amount, 0)
+        } : null,
+        smsNotification: sendSMSNotification ? {
+          scheduled: true,
+          processing: 'background'
+        } : {
+          scheduled: false
+        }
+      },
+      updatedBy: {
+        editorId: req.user._id,
+        editorUsername: req.user.username,
+        editorRole: req.user.role,
+        timestamp: new Date()
+      }
+    });
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('❌ Bulk status update error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during bulk update',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -1030,10 +1233,7 @@ router.get('/trends/weekly', adminAuth, validateModelsAndDb, async (req, res) =>
   }
 });
 
-// POST place order (main endpoint with API integration)
 // POST place order (main endpoint with API integration and stock validation)
-// Replace the existing /placeorder endpoint in your routes/orders.js with this updated version
-
 router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
   try {
     const { recipientNumber, capacity, price, bundleType } = req.body;
@@ -1367,6 +1567,7 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
     });
   }
 });
+
 // GET today's orders and revenue for admin
 router.get('/today/admin', adminAuth, validateModelsAndDb, async (req, res) => {
   try {
