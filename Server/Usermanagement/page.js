@@ -13,7 +13,7 @@ const sendSMS = async (phoneNumber, message, options = {}) => {
   const {
     scheduleTime = null,
     useCase = 'transactional',
-    senderID = 'iGet'
+    senderID = 'iGet Ghana'
   } = options;
 
   // Input validation
