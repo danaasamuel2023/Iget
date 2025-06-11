@@ -1,8 +1,110 @@
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
 const { User, Transaction, ApiLog } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth'); 
 const adminAuth = require('../adminMiddlware/middleware');
+
+// SMS configuration
+const ARKESEL_API_KEY = 'OnFqOUpMZXYyVGRGZHJWMmo=';
+
+// SMS sending function (reusable across modules)
+const sendSMS = async (phoneNumber, message, options = {}) => {
+  const {
+    scheduleTime = null,
+    useCase = 'transactional',
+    senderID = 'iGet'
+  } = options;
+
+  // Input validation
+  if (!phoneNumber || !message) {
+    throw new Error('Phone number and message are required');
+  }
+
+  // Base parameters
+  const params = {
+    action: 'send-sms',
+    api_key: ARKESEL_API_KEY,
+    to: phoneNumber,
+    from: senderID,
+    sms: message
+  };
+
+  // Add optional parameters
+  if (scheduleTime) {
+    params.schedule = scheduleTime;
+  }
+
+  if (useCase && ['promotional', 'transactional'].includes(useCase)) {
+    params.use_case = useCase;
+  }
+
+  try {
+    const response = await axios.get('https://sms.arkesel.com/sms/api', {
+      params,
+      timeout: 10000 // 10 second timeout
+    });
+
+    // Map error codes to meaningful messages
+    const errorCodes = {
+      '100': 'Bad gateway request',
+      '101': 'Wrong action',
+      '102': 'Authentication failed',
+      '103': 'Invalid phone number',
+      '104': 'Phone coverage not active',
+      '105': 'Insufficient balance',
+      '106': 'Invalid Sender ID',
+      '109': 'Invalid Schedule Time',
+      '111': 'SMS contains spam word. Wait for approval'
+    };
+
+    if (response.data.code !== 'ok') {
+      const errorMessage = errorCodes[response.data.code] || 'Unknown error occurred';
+      throw new Error(`SMS sending failed: ${errorMessage}`);
+    }
+
+    console.log('SMS sent successfully:', {
+      to: phoneNumber,
+      status: response.data.code,
+      balance: response.data.balance,
+      mainBalance: response.data.main_balance
+    });
+
+    return {
+      success: true,
+      data: response.data
+    };
+
+  } catch (error) {
+    // Handle specific error types
+    if (error.response) {
+      console.error('SMS API responded with error:', {
+        status: error.response.status,
+        data: error.response.data
+      });
+    } else if (error.request) {
+      console.error('No response received from SMS API:', error.message);
+    } else {
+      console.error('SMS request setup error:', error.message);
+    }
+
+    return {
+      success: false,
+      error: {
+        message: error.message,
+        code: error.response?.data?.code,
+        details: error.response?.data
+      }
+    };
+  }
+};
+
+// Format phone number for SMS - remove country code prefix if present
+const formatPhoneForSms = (phone) => {
+  if (!phone) return null;
+  // Remove +233 or 233 prefix and return the number
+  return phone.replace(/^\+?233/, '0');
+};
 
 // Specific role checking middleware
 const requireFullAdmin = (req, res, next) => {
@@ -207,7 +309,7 @@ router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (r
             };
         } else if (req.user.role === 'wallet_admin') {
             // wallet_admin gets limited user data - only what they need for wallet operations
-            selectFields = 'username email wallet role isActive createdAt';
+            selectFields = 'username email wallet role isActive createdAt phone';
             const users = await User.find(filter)
                 .select(selectFields)
                 .sort({ createdAt: -1 })
@@ -433,7 +535,7 @@ router.get('/transactions', auth, adminAuth, blockEditors, requireFullAdmin, asy
 // POST add money to user wallet (ADMIN & WALLET_ADMIN ONLY - EDITORS BLOCKED)
 router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requireWalletAdmin, async (req, res) => {
     try {
-        const { amount, description, paymentMethod, paymentDetails } = req.body;
+        const { amount, description, paymentMethod, paymentDetails, sendSMSNotification = true } = req.body;
         const targetUserId = req.params.userId;
         
         if (!amount || isNaN(amount) || amount <= 0) {
@@ -529,6 +631,29 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
         user.wallet.transactions.push(transaction._id);
         await user.save();
         
+        // Send SMS notification if enabled and user has a phone number
+        let smsResult = null;
+        if (sendSMSNotification && user.phone) {
+            try {
+                const formattedPhone = formatPhoneForSms(user.phone);
+                const smsMessage = `GH¢${parseFloat(amount).toFixed(2)} has been credited to your account. Your current balance is GH¢${balanceAfter.toFixed(2)}.`;
+                
+                smsResult = await sendSMS(formattedPhone, smsMessage, {
+                    useCase: 'transactional',
+                    senderID: 'iGet'
+                });
+                
+                if (smsResult.success) {
+                    console.log(`SMS sent for wallet credit: ${user.username} (${formattedPhone}), Amount: ${amount}`);
+                } else {
+                    console.error(`Failed to send credit SMS: ${smsResult.error?.message || 'Unknown error'}`);
+                }
+            } catch (smsError) {
+                console.error('Error sending credit SMS:', smsError.message);
+                smsResult = { success: false, error: { message: smsError.message } };
+            }
+        }
+        
         // Log admin action
         await logAdminAction(admin._id, 'credit_user_wallet', targetUserId, {
             amount: parseFloat(amount),
@@ -542,6 +667,14 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
             targetUser: {
                 username: user.username,
                 email: user.email
+            },
+            smsNotification: smsResult ? {
+                attempted: true,
+                success: smsResult.success || false,
+                error: smsResult.error?.message || null
+            } : {
+                attempted: false,
+                reason: 'No phone number available'
             }
         });
         
@@ -568,7 +701,11 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
                     username: user.username,
                     email: user.email
                 }
-            }
+            },
+            smsNotification: smsResult ? {
+                sent: smsResult.success || false,
+                error: smsResult.error?.message || null
+            } : null
         });
     } catch (error) {
         console.error('Error adding funds to wallet:', error);
@@ -583,7 +720,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
 // POST deduct money from user wallet (ADMIN & WALLET_ADMIN ONLY - EDITORS BLOCKED)  
 router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requireWalletAdmin, async (req, res) => {
     try {
-        const { amount, description, paymentMethod, paymentDetails } = req.body;
+        const { amount, description, paymentMethod, paymentDetails, sendSMSNotification = true } = req.body;
         const targetUserId = req.params.userId;
         
         if (!amount || isNaN(amount) || amount <= 0) {
@@ -675,6 +812,29 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requir
         user.wallet.transactions.push(transaction._id);
         await user.save();
         
+        // Send SMS notification if enabled and user has a phone number
+        let smsResult = null;
+        if (sendSMSNotification && user.phone) {
+            try {
+                const formattedPhone = formatPhoneForSms(user.phone);
+                const smsMessage = `GH¢${parseFloat(amount).toFixed(2)} has been debited from your account. Your current balance is GH¢${balanceAfter.toFixed(2)}.`;
+                
+                smsResult = await sendSMS(formattedPhone, smsMessage, {
+                    useCase: 'transactional',
+                    senderID: 'iGet'
+                });
+                
+                if (smsResult.success) {
+                    console.log(`SMS sent for wallet debit: ${user.username} (${formattedPhone}), Amount: ${amount}`);
+                } else {
+                    console.error(`Failed to send debit SMS: ${smsResult.error?.message || 'Unknown error'}`);
+                }
+            } catch (smsError) {
+                console.error('Error sending debit SMS:', smsError.message);
+                smsResult = { success: false, error: { message: smsError.message } };
+            }
+        }
+        
         // Log admin action
         await logAdminAction(admin._id, 'debit_user_wallet', targetUserId, {
             amount: parseFloat(amount),
@@ -688,6 +848,14 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requir
             targetUser: {
                 username: user.username,
                 email: user.email
+            },
+            smsNotification: smsResult ? {
+                attempted: true,
+                success: smsResult.success || false,
+                error: smsResult.error?.message || null
+            } : {
+                attempted: false,
+                reason: 'No phone number available'
             }
         });
         
@@ -714,7 +882,11 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requir
                     username: user.username,
                     email: user.email
                 }
-            }
+            },
+            smsNotification: smsResult ? {
+                sent: smsResult.success || false,
+                error: smsResult.error?.message || null
+            } : null
         });
     } catch (error) {
         console.error('Error deducting funds from wallet:', error);
@@ -1078,7 +1250,7 @@ router.get('/top-sales-users', auth, adminAuth, blockEditors, requireFullAdmin, 
 // POST reward top sales performers (FULL ADMIN ONLY - EDITORS BLOCKED)
 router.post('/reward-top-performers', auth, adminAuth, blockEditors, requireFullAdmin, async (req, res) => {
     try {
-      const { percentages, description } = req.body;
+      const { percentages, description, sendSMSNotification = true } = req.body;
       
       // Validate input
       if (!percentages || !Array.isArray(percentages) || percentages.length === 0) {
@@ -1126,6 +1298,7 @@ router.post('/reward-top-performers', auth, adminAuth, blockEditors, requireFull
       
       // Process rewards for each top performer
       const rewards = [];
+      const smsResults = [];
       
       for (let i = 0; i < Math.min(topPerformers.length, percentages.length); i++) {
         const performer = topPerformers[i];
@@ -1214,6 +1387,35 @@ router.post('/reward-top-performers', auth, adminAuth, blockEditors, requireFull
         user.wallet.transactions.push(transaction._id);
         await user.save();
         
+        // Send SMS notification if enabled and user has a phone number
+        let smsResult = null;
+        if (sendSMSNotification && user.phone) {
+          try {
+            const formattedPhone = formatPhoneForSms(user.phone);
+            const smsMessage = `Congratulations! GH¢${rewardAmount.toFixed(2)} reward has been credited to your account for excellent sales performance. Your current balance is GH¢${balanceAfter.toFixed(2)}.`;
+            
+            smsResult = await sendSMS(formattedPhone, smsMessage, {
+              useCase: 'transactional',
+              senderID: 'iGet'
+            });
+            
+            if (smsResult.success) {
+              console.log(`SMS sent for reward: ${user.username} (${formattedPhone}), Amount: ${rewardAmount}`);
+            } else {
+              console.error(`Failed to send reward SMS: ${smsResult.error?.message || 'Unknown error'}`);
+            }
+          } catch (smsError) {
+            console.error('Error sending reward SMS:', smsError.message);
+            smsResult = { success: false, error: { message: smsError.message } };
+          }
+        }
+        
+        smsResults.push({
+          userId: user._id,
+          username: user.username,
+          smsResult: smsResult
+        });
+        
         // Add to rewards array
         rewards.push({
           userId: user._id,
@@ -1222,7 +1424,11 @@ router.post('/reward-top-performers', auth, adminAuth, blockEditors, requireFull
           totalSales: performer.totalSales,
           percentage: percentage,
           rewardAmount: rewardAmount,
-          transactionId: transaction._id
+          transactionId: transaction._id,
+          smsNotification: smsResult ? {
+            sent: smsResult.success || false,
+            error: smsResult.error?.message || null
+          } : null
         });
       }
       
@@ -1233,6 +1439,11 @@ router.post('/reward-top-performers', auth, adminAuth, blockEditors, requireFull
         period: {
           from: sixDaysAgo,
           to: new Date()
+        },
+        smsNotifications: {
+          attempted: smsResults.filter(r => r.smsResult !== null).length,
+          successful: smsResults.filter(r => r.smsResult?.success).length,
+          failed: smsResults.filter(r => r.smsResult && !r.smsResult.success).length
         }
       });
       

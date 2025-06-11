@@ -1249,7 +1249,7 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
     // CHECK IF THE BUNDLE IS IN STOCK - NEW STOCK VALIDATION
     const bundle = await Bundle.findOne({
       capacity: capacity,
-      type: bundleType,
+      type: bundleType, 
       isActive: true
     });
     
