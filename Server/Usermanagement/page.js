@@ -640,7 +640,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
                 
                 smsResult = await sendSMS(formattedPhone, smsMessage, {
                     useCase: 'transactional',
-                    senderID: 'iGet'
+                    senderID: 'iGet Ghana'
                 });
                 
                 if (smsResult.success) {
@@ -821,7 +821,7 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requir
                 
                 smsResult = await sendSMS(formattedPhone, smsMessage, {
                     useCase: 'transactional',
-                    senderID: 'iGet'
+                    senderID: 'iGet Ghana'
                 });
                 
                 if (smsResult.success) {
