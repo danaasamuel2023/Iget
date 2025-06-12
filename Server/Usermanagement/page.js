@@ -6,14 +6,14 @@ const auth = require('../AuthMiddle/middlewareauth');
 const adminAuth = require('../adminMiddlware/middleware');
 
 // SMS configuration
-const ARKESEL_API_KEY = 'OnFqOUpMZXYyVGRGZHJWMmo=';
+const ARKESEL_API_KEY = 'OnFqOUpMZXYyVGRFZHJWMmo=';
 
 // SMS sending function (reusable across modules)
 const sendSMS = async (phoneNumber, message, options = {}) => {
   const {
     scheduleTime = null,
     useCase = 'transactional',
-    senderID = 'iGet Ghana'
+    senderID = 'EL VENDER'
   } = options;
 
   // Input validation
@@ -640,7 +640,7 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
                 
                 smsResult = await sendSMS(formattedPhone, smsMessage, {
                     useCase: 'transactional',
-                    senderID: 'iGet Ghana'
+                    senderID: 'EL VENDER'
                 });
                 
                 if (smsResult.success) {
@@ -821,7 +821,7 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requir
                 
                 smsResult = await sendSMS(formattedPhone, smsMessage, {
                     useCase: 'transactional',
-                    senderID: 'iGet Ghana'
+                    senderID: 'EL VENDER'
                 });
                 
                 if (smsResult.success) {
