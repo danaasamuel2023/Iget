@@ -3,7 +3,9 @@ const express = require('express');
 const router = express.Router();
 const { User, Order, Transaction } = require('../schema/schema');
 const auth = require('../AuthMiddle/middlewareauth');
-const mongoose = require('mongoose');
+const mongoose = require('mongoose')
+const adminAuth = require('../adminMiddlware/middleware'); 
+
 
 // SMS functionality removed as requested
 
@@ -168,7 +170,7 @@ router.post('/register', auth, async (req, res) => {
  * @desc    Get all AFA registrations for the logged-in user
  * @access  Private
  */
-router.get('/registrations', auth, async (req, res) => {
+router.get('/registrations', auth,adminAuth, async (req, res) => {
   try {
     const registrations = await Order.find({ 
       user: req.user.id,
