@@ -1353,7 +1353,7 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
                 phone: recipientNumber,
                 volume: volumeInMB,
                 reference: orderReference,
-                referrer: recipientNumber,
+                referrer: '0598617011',
                 webhook: ''
               })
             });
