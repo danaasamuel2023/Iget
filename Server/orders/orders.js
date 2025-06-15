@@ -1234,9 +1234,13 @@ router.get('/trends/weekly', adminAuth, validateModelsAndDb, async (req, res) =>
 });
 
 // POST place order (main endpoint with API integration and stock validation)
+// POST place order (main endpoint with API integration and unit-based stock validation)
 router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
   try {
-    const { recipientNumber, capacity, price, bundleType } = req.body;
+    const { recipientNumber, capacity, price, bundleType, quantity = 1 } = req.body;
     
     // Validate required fields
     if (!recipientNumber || !capacity || !price || !bundleType) {
@@ -1246,47 +1250,72 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
       });
     }
     
-    // CHECK IF THE BUNDLE IS IN STOCK - NEW STOCK VALIDATION
+    // Find the bundle and check stock units
     const bundle = await Bundle.findOne({
       capacity: capacity,
       type: bundleType, 
       isActive: true
-    });
+    }).session(session);
     
-    if (bundle && (bundle.stockStatus?.isOutOfStock || !bundle.isInStock)) {
+    if (!bundle) {
+      await session.abortTransaction();
+      return res.status(404).json({
+        success: false,
+        message: 'Bundle configuration not found'
+      });
+    }
+    
+    // Check if bundle has sufficient stock units
+    const availableStock = bundle.stockUnits?.available || 0;
+    if (availableStock < quantity) {
+      await session.abortTransaction();
       return res.status(400).json({
         success: false,
-        message: `This bundle (${capacity}GB ${bundleType}) is currently out of stock`,
+        message: `Insufficient stock for ${capacity}GB ${bundleType}`,
         stockInfo: {
-          reason: bundle.stockStatus?.reason || 'No reason provided',
-          markedOutAt: bundle.stockStatus?.markedOutOfStockAt
+          available: availableStock,
+          requested: quantity,
+          isOutOfStock: availableStock === 0,
+          isLowStock: bundle.stockStatus?.isLowStock || false,
+          reason: bundle.stockStatus?.reason
         }
       });
     }
     
-    // If bundle doesn't exist but we're creating orders dynamically, check if we should block it
-    if (!bundle && req.user.role !== 'admin') {
-      // For non-admin users, we might want to prevent creating new bundle types on the fly
-      return res.status(400).json({
-        success: false,
-        message: 'This bundle configuration is not available'
-      });
-    }
-    
     // Get user for wallet balance check
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user.id).session(session);
     if (!user) {
+      await session.abortTransaction();
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
     
+    // Calculate total price based on user role
+    const rolePrice = bundle.getPriceForRole ? bundle.getPriceForRole(user.role) : 
+                     (bundle.rolePricing && bundle.rolePricing[user.role]) || bundle.price;
+    const totalPrice = rolePrice * quantity;
+    
     // Check if user has enough balance
-    if (user.wallet.balance < price) {
+    if (user.wallet.balance < totalPrice) {
+      await session.abortTransaction();
       return res.status(400).json({
         success: false,
-        message: 'Insufficient balance in wallet'
+        message: 'Insufficient balance in wallet',
+        required: totalPrice,
+        available: user.wallet.balance
+      });
+    }
+    
+    // Reserve stock units for this order
+    try {
+      await bundle.reserveStock(quantity, session);
+    } catch (stockError) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: stockError.message
       });
     }
     
@@ -1296,275 +1325,222 @@ router.post('/placeorder', auth, validateModelsAndDb, async (req, res) => {
       adminSettings = await AdminSettings.getSettings();
     } catch (settingsError) {
       console.error('Error fetching admin settings:', settingsError);
-      // Continue with default settings if AdminSettings fails
       adminSettings = { apiIntegrations: {} };
     }
     
-    // Start a session for the transaction
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Create new order with stock metadata
+    const newOrder = new Order({
+      user: req.user.id,
+      bundleType: bundleType,
+      capacity: capacity,
+      price: totalPrice,
+      recipientNumber: recipientNumber,
+      status: 'pending',
+      metadata: {
+        quantity: quantity,
+        unitPrice: rolePrice,
+        bundleId: bundle._id,
+        stockReserved: quantity,
+        stockSnapshot: {
+          availableBefore: availableStock,
+          availableAfter: bundle.stockUnits.available
+        }
+      },
+      updatedAt: Date.now()
+    });
     
-    try {
-      // Create new order - initially with 'pending' status
-      const newOrder = new Order({
-        user: req.user.id,
-        bundleType: bundleType,
-        capacity: capacity,
-        price: price,
-        recipientNumber: recipientNumber,
-        status: 'pending',
-        updatedAt: Date.now()
-      });
+    // Generate order reference
+    const orderReference = Math.floor(1000 + Math.random() * 900000);
+    newOrder.orderReference = orderReference.toString();
+    
+    // Handle API integrations for specific bundle types
+    let apiError = null;
+    
+    if (bundleType.toLowerCase() === 'mtnup2u') {
+      const mtnApiEnabled = adminSettings.apiIntegrations?.mtnHubnetEnabled !== false;
       
-      // Generate order reference
-      const orderReference = Math.floor(1000 + Math.random() * 900000);
-      newOrder.orderReference = orderReference.toString();
-      
-      // For mtnup2u bundle types, check if API is enabled
-      if (bundleType.toLowerCase() === 'mtnup2u') {
-        // Check if MTN Hubnet API integration is enabled
-        const mtnApiEnabled = adminSettings.apiIntegrations?.mtnHubnetEnabled !== false; // Default to true if setting doesn't exist
-        
-        if (mtnApiEnabled) {
-          try {
-            // Calculate volume in MB (in case the capacity is in GB)
-            let volumeInMB = capacity;
-            if (capacity < 100) { // Assuming small numbers represent GB
-              volumeInMB = parseFloat(capacity) * 1000;
-            }
-            
-            // Log the Hubnet API request for debugging
-            console.log('Making Hubnet API request for mtnup2u bundle');
-            console.log('Request payload:', {
+      if (mtnApiEnabled) {
+        try {
+          let volumeInMB = capacity;
+          if (capacity < 100) {
+            volumeInMB = parseFloat(capacity) * 1000;
+          }
+          
+          console.log('Making Hubnet API request for mtnup2u bundle');
+          
+          const hubnetResponse = await fetch(`https://console.hubnet.app/live/api/context/business/transaction/mtn-new-transaction`, {
+            method: 'POST',
+            headers: {
+              'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
               phone: recipientNumber,
               volume: volumeInMB,
               reference: orderReference,
-              referrer: recipientNumber
-            });
-            
-            // Make request to Hubnet API
-            const hubnetResponse = await fetch(`https://console.hubnet.app/live/api/context/business/transaction/mtn-new-transaction`, {
-              method: 'POST',
-              headers: {
-                'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                phone: recipientNumber,
-                volume: volumeInMB,
-                reference: orderReference,
-                referrer: '0598617011',
-                webhook: ''
-              })
-            });
-            
-            const hubnetData = await hubnetResponse.json();
-            
-            console.log('Hubnet API Response:', hubnetData);
-            
-            if (!hubnetResponse.ok) {
-              console.error('Hubnet order failed:', hubnetData);
-              await session.abortTransaction();
-              session.endSession();
-              return res.status(400).json({
-                success: false,
-                message: 'Hubnet API purchase failed. No payment has been processed.',
-                error: hubnetData.message || 'Unknown error'
-              });
-            }
-            
-            // Update order with Hubnet reference
-            newOrder.apiReference = orderReference.toString();
-            newOrder.hubnetReference = orderReference.toString();
-            
-            // Set status to pending for Editor approval
-            newOrder.status = 'pending';
-            
-            console.log(`Hubnet mtn order placed successfully: ${orderReference}`);
-          } catch (apiError) {
-            console.error('Error calling Hubnet API:', apiError.message);
-            if (apiError.response) {
-              console.error('Response status:', apiError.response.status);
-              console.error('Response data:', apiError.response.data);
-            }
-            
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
-              success: false,
-              message: 'Hubnet API connection error. No payment has been processed.',
-              error: apiError.message,
-              details: apiError.response?.data || 'Connection error'
-            });
+              referrer: '0598617011',
+              webhook: ''
+            })
+          });
+          
+          const hubnetData = await hubnetResponse.json();
+          console.log('Hubnet API Response:', hubnetData);
+          
+          if (!hubnetResponse.ok) {
+            apiError = hubnetData.message || 'Hubnet API error';
+            throw new Error(apiError);
           }
-        } else {
-          // API is disabled, set order to pending for manual processing
-          console.log('MTN Hubnet API integration is disabled. Order set to pending for manual processing.');
-          newOrder.status = 'pending';
-          newOrder.apiReference = null;
-          newOrder.hubnetReference = null;
+          
+          newOrder.apiReference = orderReference.toString();
+          newOrder.hubnetReference = orderReference.toString();
+          
+        } catch (error) {
+          console.error('Error calling Hubnet API:', error.message);
+          // Release reserved stock on API failure
+          await bundle.releaseReservation(quantity, session);
+          await session.abortTransaction();
+          
+          return res.status(400).json({
+            success: false,
+            message: 'API purchase failed. No payment has been processed.',
+            error: error.message,
+            stockReleased: true
+          });
         }
       }
-      // For AT-ishare bundle type, check if API is enabled
-      else if (bundleType.toLowerCase() === 'at-ishare') {
-        // Check if AT Hubnet API integration is enabled
-        const atApiEnabled = adminSettings.apiIntegrations?.atHubnetEnabled !== false; // Default to true if setting doesn't exist
-        
-        if (atApiEnabled) {
-          try {
-            // Calculate volume in MB (in case the capacity is in GB)
-            let volumeInMB = capacity;
-            if (capacity < 100) { // Assuming small numbers represent GB
-              volumeInMB = parseFloat(capacity) * 1000;
-            }
-            
-            // Log the Hubnet API request for debugging
-            console.log('Making Hubnet API request for AT-ishare bundle');
-            console.log('Request payload:', {
+    } else if (bundleType.toLowerCase() === 'at-ishare') {
+      const atApiEnabled = adminSettings.apiIntegrations?.atHubnetEnabled !== false;
+      
+      if (atApiEnabled) {
+        try {
+          let volumeInMB = capacity;
+          if (capacity < 100) {
+            volumeInMB = parseFloat(capacity) * 1000;
+          }
+          
+          console.log('Making Hubnet API request for AT-ishare bundle');
+          
+          const hubnetResponse = await fetch(`https://console.hubnet.app/live/api/context/business/transaction/at-new-transaction`, {
+            method: 'POST',
+            headers: {
+              'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
               phone: recipientNumber,
               volume: volumeInMB,
               reference: orderReference,
-              referrer: recipientNumber
-            });
-            
-            // Make request to Hubnet API
-            const hubnetResponse = await fetch(`https://console.hubnet.app/live/api/context/business/transaction/at-new-transaction`, {
-              method: 'POST',
-              headers: {
-                'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                phone: recipientNumber,
-                volume: volumeInMB,
-                reference: orderReference,
-                referrer: recipientNumber,
-                webhook: ''
-              })
-            });
-            
-            const hubnetData = await hubnetResponse.json();
-            
-            console.log('Hubnet API Response:', hubnetData);
-            
-            if (!hubnetResponse.ok) {
-              console.error('Hubnet order failed:', hubnetData);
-              await session.abortTransaction();
-              session.endSession();
-              return res.status(400).json({
-                success: false,
-                message: 'Hubnet API purchase failed. No payment has been processed.',
-                error: hubnetData.message || 'Unknown error'
-              });
-            }
-            
-            // Update order with Hubnet reference
-            newOrder.apiReference = orderReference.toString();
-            newOrder.hubnetReference = orderReference.toString();
-            
-            // Set status to pending for Editor approval
-            newOrder.status = 'pending';
-            
-            console.log(`Hubnet AT order placed successfully: ${orderReference}`);
-          } catch (apiError) {
-            console.error('Error calling Hubnet API:', apiError.message);
-            if (apiError.response) {
-              console.error('Response status:', apiError.response.status);
-              console.error('Response data:', apiError.response.data);
-            }
-            
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
-              success: false,
-              message: 'Hubnet API connection error. No payment has been processed.',
-              error: apiError.message,
-              details: apiError.response?.data || 'Connection error'
-            });
+              referrer: recipientNumber,
+              webhook: ''
+            })
+          });
+          
+          const hubnetData = await hubnetResponse.json();
+          console.log('Hubnet API Response:', hubnetData);
+          
+          if (!hubnetResponse.ok) {
+            apiError = hubnetData.message || 'Hubnet API error';
+            throw new Error(apiError);
           }
-        } else {
-          // API is disabled, set order to pending for manual processing
-          console.log('AT Hubnet API integration is disabled. Order set to pending for manual processing.');
-          newOrder.status = 'pending';
-          newOrder.apiReference = null;
-          newOrder.hubnetReference = null;
+          
+          newOrder.apiReference = orderReference.toString();
+          newOrder.hubnetReference = orderReference.toString();
+          
+        } catch (error) {
+          console.error('Error calling Hubnet API:', error.message);
+          // Release reserved stock on API failure
+          await bundle.releaseReservation(quantity, session);
+          await session.abortTransaction();
+          
+          return res.status(400).json({
+            success: false,
+            message: 'purchase failed. No payment has been processed.',
+            error: error.message,
+            stockReleased: true
+          });
         }
       }
-      // For other bundle types, continue with normal processing
-      else {
-        // Other bundle types don't use API, so they'll remain in pending status
-        console.log(`Order for bundle type ${bundleType} set to pending for Editor processing.`);
-      }
-      
-      // Only proceed with saving order and processing payment
-      await newOrder.save({ session });
-      
-      // Create transaction record
-      const transaction = new Transaction({
-        user: req.user.id,
-        type: 'purchase',
-        amount: price,
-        currency: user.wallet.currency,
-        description: `Bundle purchase: ${capacity}MB for ${recipientNumber}`,
-        status: 'completed',
-        reference: 'TXN-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
-        orderId: newOrder._id,
-        balanceBefore: user.wallet.balance,
-        balanceAfter: user.wallet.balance - price,
-        paymentMethod: 'wallet'
-      });
-      
-      await transaction.save({ session });
-      
-      // Update user's wallet balance
-      user.wallet.balance -= price;
-      user.wallet.transactions.push(transaction._id);
-      await user.save({ session });
-      
-      // Commit the transaction
-      await session.commitTransaction();
-      session.endSession();
-      
-      // Return the created order
-      res.status(201).json({
-        success: true,
-        message: 'Order placed successfully and awaiting Editor approval',
-        data: {
-          order: {
-            id: newOrder._id,
-            orderReference: newOrder.orderReference,
-            recipientNumber: newOrder.recipientNumber,
-            bundleType: newOrder.bundleType,
-            capacity: newOrder.capacity,
-            price: newOrder.price,
-            status: newOrder.status,
-            createdAt: newOrder.createdAt
-          },
-          transaction: {
-            id: transaction._id,
-            reference: transaction.reference,
-            amount: transaction.amount,
-            status: transaction.status
-          },
-          walletBalance: user.wallet.balance,
-          note: 'Your order is pending and will be processed by our Editors'
-        }
-      });
-      
-    } catch (error) {
-      // If an error occurs, abort the transaction
-      await session.abortTransaction();
-      session.endSession();
-      throw error;
     }
     
+    // Save the order
+    await newOrder.save({ session });
+    
+    // Create transaction record with stock info
+    const transaction = new Transaction({
+      user: req.user.id,
+      type: 'purchase',
+      amount: -totalPrice,
+      currency: user.wallet.currency,
+      description: `Bundle purchase: ${quantity}x ${capacity}GB ${bundleType} for ${recipientNumber}`,
+      status: 'completed',
+      reference: 'TXN-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+      orderId: newOrder._id,
+      balanceBefore: user.wallet.balance,
+      balanceAfter: user.wallet.balance - totalPrice,
+      paymentMethod: 'wallet',
+      metadata: {
+        bundleId: bundle._id,
+        quantity: quantity,
+        stockReserved: quantity
+      }
+    });
+    
+    await transaction.save({ session });
+    
+    // Update user's wallet balance
+    user.wallet.balance -= totalPrice;
+    user.wallet.transactions.push(transaction._id);
+    await user.save({ session });
+    
+    // Commit the transaction
+    await session.commitTransaction();
+    
+    // Log stock reservation
+    console.log(`Stock reserved for order ${newOrder._id}: ${quantity} units of ${bundleType} ${capacity}GB`);
+    
+    // Return the created order with stock info
+    res.status(201).json({
+      success: true,
+      message: 'Order placed successfully and awaiting Editor approval',
+      data: {
+        order: {
+          id: newOrder._id,
+          orderReference: newOrder.orderReference,
+          recipientNumber: newOrder.recipientNumber,
+          bundleType: newOrder.bundleType,
+          capacity: newOrder.capacity,
+          price: newOrder.price,
+          status: newOrder.status,
+          quantity: quantity,
+          createdAt: newOrder.createdAt
+        },
+        transaction: {
+          id: transaction._id,
+          reference: transaction.reference,
+          amount: transaction.amount,
+          status: transaction.status
+        },
+        walletBalance: user.wallet.balance,
+        stockInfo: {
+          reserved: quantity,
+          remainingAvailable: bundle.stockUnits.available,
+          isLowStock: bundle.stockStatus?.isLowStock || false
+        },
+        note: 'Your order is pending and will be processed by our Editors. Stock has been reserved.'
+      }
+    });
+    
   } catch (error) {
+    // If an error occurs, abort the transaction
+    await session.abortTransaction();
     console.error('Error placing order:', error);
     res.status(500).json({
       success: false,
       message: 'Server error',
       error: error.message
     });
+  } finally {
+    session.endSession();
   }
 });
 

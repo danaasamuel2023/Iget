@@ -156,6 +156,7 @@ userSchema.methods.canUpdateOrderStatus = function() {
 };
 
 // Bundle Schema with role-based pricing and stock management
+// Enhanced Bundle Schema with unit-based stock management
 const bundleSchema = new Schema({
   capacity: { type: Number, required: true }, // Data capacity in MB
   // Base price
@@ -173,15 +174,42 @@ const bundleSchema = new Schema({
     required: true
   },
   
-  // Stock management fields
-  isInStock: { type: Boolean, default: true }, // Whether this bundle is in stock
+  // NEW: Unit-based stock management fields
+  stockUnits: {
+    available: { type: Number, default: 0, min: 0 }, // Current available units
+    initial: { type: Number, default: 0, min: 0 }, // Initial stock when created/restocked
+    reserved: { type: Number, default: 0, min: 0 }, // Units reserved for pending orders
+    sold: { type: Number, default: 0, min: 0 }, // Total units sold
+    
+    // Stock threshold for low stock warnings
+    lowStockThreshold: { type: Number, default: 10, min: 0 },
+    
+    // Restock history
+    restockHistory: [{
+      previousUnits: { type: Number },
+      addedUnits: { type: Number },
+      newTotal: { type: Number },
+      restockedBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
+      restockedAt: { type: Date, default: Date.now },
+      reason: { type: String }
+    }],
+    
+    // Last update info
+    lastUpdatedBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
+    lastUpdatedAt: { type: Date }
+  },
+  
+  // Stock management fields (automatically managed based on units)
+  isInStock: { type: Boolean, default: true }, // Automatically set based on available units
   stockStatus: {
     isOutOfStock: { type: Boolean, default: false },
+    isLowStock: { type: Boolean, default: false }, // NEW: Low stock indicator
     reason: { type: String }, // Reason for being out of stock
     markedOutOfStockBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
     markedOutOfStockAt: { type: Date },
     markedInStockBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
-    markedInStockAt: { type: Date }
+    markedInStockAt: { type: Date },
+    autoOutOfStock: { type: Boolean, default: false } // NEW: Indicates if it went out of stock automatically
   },
   
   isActive: { type: Boolean, default: true },
@@ -189,17 +217,230 @@ const bundleSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-// Add a method to get price based on user role
+// Add indexes for better query performance
+bundleSchema.index({ type: 1, capacity: 1 });
+bundleSchema.index({ 'stockUnits.available': 1 });
+bundleSchema.index({ 'stockStatus.isOutOfStock': 1 });
+bundleSchema.index({ 'stockStatus.isLowStock': 1 });
+
+// Virtual property to calculate stock percentage
+bundleSchema.virtual('stockPercentage').get(function() {
+  if (!this.stockUnits.initial || this.stockUnits.initial === 0) {
+    return 0;
+  }
+  return Math.round((this.stockUnits.available / this.stockUnits.initial) * 100);
+});
+
+// Virtual property to check if stock is critically low (less than 20% remaining)
+bundleSchema.virtual('isCriticallyLow').get(function() {
+  return this.stockPercentage > 0 && this.stockPercentage < 20;
+});
+
+// Method to get price based on user role
 bundleSchema.methods.getPriceForRole = function(role) {
-  // If role-specific price exists, return it, otherwise return the base price
   return (this.rolePricing && this.rolePricing[role]) || this.price;
 };
 
-// Add method to check if bundle is available for purchase
-bundleSchema.methods.isAvailableForPurchase = function() {
-  return this.isActive && this.isInStock && !this.stockStatus.isOutOfStock;
+// Method to check if bundle is available for purchase
+bundleSchema.methods.isAvailableForPurchase = function(quantity = 1) {
+  return this.isActive && 
+         this.isInStock && 
+         !this.stockStatus.isOutOfStock && 
+         this.stockUnits.available >= quantity;
 };
 
+// Method to check if bundle has sufficient stock
+bundleSchema.methods.hasSufficientStock = function(quantity = 1) {
+  return this.stockUnits.available >= quantity;
+};
+
+// Method to reserve stock for pending orders
+bundleSchema.methods.reserveStock = async function(quantity = 1, session) {
+  if (this.stockUnits.available < quantity) {
+    throw new Error(`Insufficient stock. Available: ${this.stockUnits.available}, Requested: ${quantity}`);
+  }
+  
+  this.stockUnits.available -= quantity;
+  this.stockUnits.reserved += quantity;
+  
+  // Check if we need to update stock status
+  await this.updateStockStatus();
+  
+  if (session) {
+    return this.save({ session });
+  }
+  return this.save();
+};
+
+// Method to confirm stock reservation (when order is completed)
+bundleSchema.methods.confirmReservation = async function(quantity = 1, session) {
+  if (this.stockUnits.reserved < quantity) {
+    throw new Error(`Invalid reservation. Reserved: ${this.stockUnits.reserved}, Confirming: ${quantity}`);
+  }
+  
+  this.stockUnits.reserved -= quantity;
+  this.stockUnits.sold += quantity;
+  
+  if (session) {
+    return this.save({ session });
+  }
+  return this.save();
+};
+
+// Method to release reserved stock (when order fails/cancelled)
+bundleSchema.methods.releaseReservation = async function(quantity = 1, session) {
+  this.stockUnits.available += quantity;
+  this.stockUnits.reserved = Math.max(0, this.stockUnits.reserved - quantity);
+  
+  // Check if we need to update stock status
+  await this.updateStockStatus();
+  
+  if (session) {
+    return this.save({ session });
+  }
+  return this.save();
+};
+
+// Method to update stock status based on available units
+bundleSchema.methods.updateStockStatus = async function() {
+  const previousOutOfStock = this.stockStatus.isOutOfStock;
+  const previousLowStock = this.stockStatus.isLowStock;
+  
+  // Check if out of stock
+  if (this.stockUnits.available === 0) {
+    this.isInStock = false;
+    this.stockStatus.isOutOfStock = true;
+    this.stockStatus.autoOutOfStock = true;
+    if (!previousOutOfStock) {
+      this.stockStatus.markedOutOfStockAt = new Date();
+      this.stockStatus.reason = 'Automatically marked out of stock - no units available';
+    }
+  } else {
+    this.isInStock = true;
+    this.stockStatus.isOutOfStock = false;
+    this.stockStatus.autoOutOfStock = false;
+    if (previousOutOfStock) {
+      this.stockStatus.markedInStockAt = new Date();
+    }
+  }
+  
+  // Check if low stock
+  this.stockStatus.isLowStock = this.stockUnits.available > 0 && 
+                                this.stockUnits.available <= this.stockUnits.lowStockThreshold;
+};
+
+// Method to restock bundle
+bundleSchema.methods.restock = async function(units, userId, reason, session) {
+  if (units <= 0) {
+    throw new Error('Restock units must be greater than 0');
+  }
+  
+  const previousUnits = this.stockUnits.available;
+  
+  // Add to restock history
+  this.stockUnits.restockHistory.push({
+    previousUnits: previousUnits,
+    addedUnits: units,
+    newTotal: previousUnits + units,
+    restockedBy: userId,
+    restockedAt: new Date(),
+    reason: reason || 'Manual restock'
+  });
+  
+  // Update stock units
+  this.stockUnits.available += units;
+  this.stockUnits.initial = Math.max(this.stockUnits.initial, this.stockUnits.available);
+  this.stockUnits.lastUpdatedBy = userId;
+  this.stockUnits.lastUpdatedAt = new Date();
+  
+  // Update stock status
+  await this.updateStockStatus();
+  
+  // If bundle was out of stock and now has stock, update the status
+  if (previousUnits === 0 && this.stockUnits.available > 0) {
+    this.stockStatus.markedInStockBy = userId;
+    this.stockStatus.markedInStockAt = new Date();
+  }
+  
+  this.updatedAt = new Date();
+  
+  if (session) {
+    return this.save({ session });
+  }
+  return this.save();
+};
+
+// Method to adjust stock (can be positive or negative)
+bundleSchema.methods.adjustStock = async function(adjustment, userId, reason, session) {
+  const newAvailable = this.stockUnits.available + adjustment;
+  
+  if (newAvailable < 0) {
+    throw new Error(`Cannot reduce stock below 0. Current: ${this.stockUnits.available}, Adjustment: ${adjustment}`);
+  }
+  
+  // If it's a positive adjustment, treat it as a restock
+  if (adjustment > 0) {
+    return this.restock(adjustment, userId, reason, session);
+  }
+  
+  // For negative adjustments
+  this.stockUnits.available = newAvailable;
+  this.stockUnits.lastUpdatedBy = userId;
+  this.stockUnits.lastUpdatedAt = new Date();
+  
+  // Add to history if it's a significant reduction
+  if (adjustment < 0) {
+    this.stockUnits.restockHistory.push({
+      previousUnits: this.stockUnits.available - adjustment,
+      addedUnits: adjustment,
+      newTotal: this.stockUnits.available,
+      restockedBy: userId,
+      restockedAt: new Date(),
+      reason: reason || 'Stock adjustment'
+    });
+  }
+  
+  // Update stock status
+  await this.updateStockStatus();
+  
+  this.updatedAt = new Date();
+  
+  if (session) {
+    return this.save({ session });
+  }
+  return this.save();
+};
+
+// Pre-save middleware to update permissions and check stock
+bundleSchema.pre('save', async function(next) {
+  // Update stock status if stock units changed
+  if (this.isModified('stockUnits.available')) {
+    await this.updateStockStatus();
+  }
+  
+  this.updatedAt = new Date();
+  next();
+});
+
+// Static method to get low stock bundles
+bundleSchema.statics.getLowStockBundles = function() {
+  return this.find({
+    isActive: true,
+    'stockStatus.isLowStock': true
+  }).sort({ 'stockUnits.available': 1 });
+};
+
+// Static method to get out of stock bundles
+bundleSchema.statics.getOutOfStockBundles = function() {
+  return this.find({
+    isActive: true,
+    'stockStatus.isOutOfStock': true
+  }).sort({ 'stockStatus.markedOutOfStockAt': -1 });
+};
+
+// Add toJSON to include virtuals
+bundleSchema.set('toJSON', { virtuals: true });
+bundleSchema.set('toObject', { virtuals: true });
 // Enhanced Order Schema with Editor support
 const orderSchema = new Schema({
   user: {
