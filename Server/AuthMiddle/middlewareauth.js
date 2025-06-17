@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { User } = require('../schema/schema'); // Import your User model
+const { executeWithRetry } = require('../connection/connection'); // Add this import
 
 const authMiddleware = async (req, res, next) => {
   try {
@@ -27,8 +28,11 @@ const authMiddleware = async (req, res, next) => {
       });
     }
     
-    // Fetch complete user data from database
-    const user = await User.findById(userId).select('-password'); // Exclude password
+    // Fetch complete user data from database with retry logic
+    const user = await executeWithRetry(
+      async () => await User.findById(userId).select('-password'), // Exclude password
+      'Auth middleware: Find user by ID'
+    );
     
     if (!user) {
       return res.status(401).json({
@@ -59,7 +63,7 @@ const authMiddleware = async (req, res, next) => {
     
     next();
   } catch (error) {
-    console.error('Authentication middleware error:', error);
+    console.error('API Authentication Error:', error);
     
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
@@ -72,6 +76,17 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({
         success: false,
         message: 'Authentication token expired'
+      });
+    }
+    
+    // Handle MongoDB replica set errors
+    if (error.name === 'MongoServerSelectionError' || 
+        error.message?.includes('primary marked stale') ||
+        error.message?.includes('ReplicaSetNoPrimary')) {
+      return res.status(503).json({
+        success: false,
+        message: 'Database service temporarily unavailable. Please try again.',
+        retryAfter: 5 // seconds
       });
     }
     

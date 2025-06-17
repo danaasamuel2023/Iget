@@ -1,6 +1,7 @@
 // adminMiddleware/middleware.js - Updated version
 const jwt = require('jsonwebtoken');
-const { User } = require('../schema/schema'); 
+const { User } = require('../schema/schema');
+const { executeWithRetry } = require('../connection/connection'); // Add this import
 
 /**
  * Middleware to verify admin privileges
@@ -76,8 +77,33 @@ module.exports = async function(req, res, next) {
       
       console.log('🔍 Looking up user with ID:', userId);
       
-      // Get user from database
-      user = await User.findById(userId).select('-password');
+      // Get user from database with retry logic for MongoDB replica set errors
+      try {
+        user = await executeWithRetry(
+          async () => await User.findById(userId).select('-password'),
+          'Admin middleware: Find user by ID'
+        );
+      } catch (dbError) {
+        console.error('❌ Database error when fetching user:', dbError.message);
+        
+        // If executeWithRetry still fails after retries, handle the error
+        if (dbError.name === 'MongoServerSelectionError' || 
+            dbError.message?.includes('primary marked stale') ||
+            dbError.message?.includes('ReplicaSetNoPrimary')) {
+          return res.status(503).json({
+            success: false,
+            message: 'Database service temporarily unavailable. Please try again in a few seconds.',
+            retryAfter: 5 // seconds
+          });
+        }
+        
+        // For other database errors
+        return res.status(500).json({
+          success: false,
+          message: 'Database error occurred',
+          error: process.env.NODE_ENV === 'development' ? dbError.message : undefined
+        });
+      }
       
       if (!user) {
         console.error('❌ User not found in database');
@@ -143,6 +169,18 @@ module.exports = async function(req, res, next) {
     next();
   } catch (error) {
     console.error('💥 Admin auth middleware error:', error);
+    
+    // Handle MongoDB replica set errors that might occur elsewhere
+    if (error.name === 'MongoServerSelectionError' || 
+        error.message?.includes('primary marked stale') ||
+        error.message?.includes('ReplicaSetNoPrimary')) {
+      return res.status(503).json({
+        success: false,
+        message: 'Database service temporarily unavailable. Please try again in a few seconds.',
+        retryAfter: 5
+      });
+    }
+    
     res.status(500).json({
       success: false,
       message: 'Admin authorization failed',
