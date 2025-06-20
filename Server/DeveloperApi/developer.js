@@ -8,6 +8,19 @@ const mongoose = require('mongoose');
 const AdminSettings = require('../AdminSettingSchema/AdminSettings.js');
 
 /**
+ * Generate a 6-character alphanumeric reference
+ * @returns {string} 6-character reference
+ */
+function generateReference() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+/**
  * @route   POST /api/v1/orders/place
  * @desc    Place an order using API key auth with stock validation
  * @access  Private (API Key)
@@ -30,12 +43,12 @@ router.post('/orders/place', apiAuth, async (req, res) => {
     // Validate reference if provided
     let orderReference;
     if (reference) {
-      // Check if reference is a string and has reasonable length
-      if (typeof reference !== 'string' || reference.length < 3 || reference.length > 50) {
+      // Check if reference is a string and has reasonable length (but enforce 6 characters for consistency)
+      if (typeof reference !== 'string' || reference.length !== 6) {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: 'Reference must be a string between 3 and 50 characters'
+          message: 'Reference must be exactly 6 characters long'
         });
       }
       
@@ -49,16 +62,33 @@ router.post('/orders/place', apiAuth, async (req, res) => {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: 'Reference already exists for your account. Please use a unique reference.',
+          message: 'Reference already exists for your account. Please use a unique 6-character reference.',
           existingOrderId: existingOrder._id
         });
       }
       
-      orderReference = reference;
+      orderReference = reference.toUpperCase(); // Normalize to uppercase
       console.log(`Using developer-provided reference: ${orderReference}`);
     } else {
-      // Generate our own reference if not provided
-      orderReference = Math.floor(1000 + Math.random() * 900000).toString();
+      // Generate our own 6-character reference if not provided
+      let attempts = 0;
+      do {
+        orderReference = generateReference();
+        attempts++;
+        
+        // Check if generated reference already exists (very unlikely but good practice)
+        const existingOrder = await Order.findOne({
+          orderReference: orderReference,
+          user: req.user.id
+        }).session(session);
+        
+        if (!existingOrder) break;
+        
+        if (attempts > 10) {
+          throw new Error('Unable to generate unique reference after multiple attempts');
+        }
+      } while (attempts <= 10);
+      
       console.log(`Generated system reference: ${orderReference}`);
     }
     
@@ -167,7 +197,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
       price: totalPrice,
       recipientNumber: recipientNumber,
       status: 'pending',
-      orderReference: orderReference, // Use the determined reference
+      orderReference: orderReference, // Use the determined 6-character reference
       metadata: {
         quantity: quantity,
         unitPrice: rolePrice,
@@ -207,7 +237,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             body: JSON.stringify({
               phone: recipientNumber,
               volume: volumeInMB,
-              reference: orderReference, // Use the same reference for external API
+              reference: orderReference, // Use the same 6-character reference for external API
               referrer: '0598617011',
               webhook: ''
             })
@@ -259,7 +289,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             body: JSON.stringify({
               phone: recipientNumber,
               volume: volumeInMB,
-              reference: orderReference, // Use the same reference for external API
+              reference: orderReference, // Use the same 6-character reference for external API
               referrer: recipientNumber,
               webhook: ''
             })
@@ -424,17 +454,18 @@ router.get('/orders/reference/:orderRef', apiAuth, async (req, res) => {
   try {
     const orderReference = req.params.orderRef;
     
-    // Validate order reference format
-    if (!orderReference) {
+    // Validate order reference format (must be exactly 6 characters)
+    if (!orderReference || orderReference.length !== 6) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Order reference is required' 
+        message: 'Order reference must be exactly 6 characters long' 
       });
     }
     
     // Find the order by reference, ensuring it belongs to the authenticated user
+    // Case-insensitive search since we store references in uppercase
     const order = await Order.findOne({
-      orderReference: orderReference,
+      orderReference: orderReference.toUpperCase(),
       user: req.user.id
     });
 
