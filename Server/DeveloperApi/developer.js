@@ -43,18 +43,27 @@ router.post('/orders/place', apiAuth, async (req, res) => {
     // Validate reference if provided
     let orderReference;
     if (reference) {
-      // Check if reference is a string and has reasonable length (but enforce 6 characters for consistency)
-      if (typeof reference !== 'string' || reference.length !== 6) {
+      // Check if reference is a string and has reasonable length (allow any length for developers)
+      if (typeof reference !== 'string' || reference.trim().length === 0) {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: 'Reference must be exactly 6 characters long'
+          message: 'Reference must be a non-empty string'
+        });
+      }
+      
+      // Optional: Add maximum length limit for practical reasons (e.g., 50 characters)
+      if (reference.length > 50) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: 'Reference cannot be longer than 50 characters'
         });
       }
       
       // Check if reference already exists for this user
       const existingOrder = await Order.findOne({
-        orderReference: reference,
+        orderReference: reference.trim().toUpperCase(),
         user: req.user.id
       }).session(session);
       
@@ -62,12 +71,12 @@ router.post('/orders/place', apiAuth, async (req, res) => {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: 'Reference already exists for your account. Please use a unique 6-character reference.',
+          message: 'Reference already exists for your account. Please use a unique reference.',
           existingOrderId: existingOrder._id
         });
       }
       
-      orderReference = reference.toUpperCase(); // Normalize to uppercase
+      orderReference = reference.trim().toUpperCase(); // Normalize to uppercase and trim whitespace
       console.log(`Using developer-provided reference: ${orderReference}`);
     } else {
       // Generate our own 6-character reference if not provided
@@ -197,7 +206,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
       price: totalPrice,
       recipientNumber: recipientNumber,
       status: 'pending',
-      orderReference: orderReference, // Use the determined 6-character reference
+      orderReference: orderReference, // Use the determined reference (any length)
       metadata: {
         quantity: quantity,
         unitPrice: rolePrice,
@@ -237,7 +246,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             body: JSON.stringify({
               phone: recipientNumber,
               volume: volumeInMB,
-              reference: orderReference, // Use the same 6-character reference for external API
+              reference: orderReference, // Use the same reference for external API (any length)
               referrer: '0598617011',
               webhook: ''
             })
@@ -289,7 +298,7 @@ router.post('/orders/place', apiAuth, async (req, res) => {
             body: JSON.stringify({
               phone: recipientNumber,
               volume: volumeInMB,
-              reference: orderReference, // Use the same 6-character reference for external API
+              reference: orderReference, // Use the same reference for external API (any length)
               referrer: recipientNumber,
               webhook: ''
             })
@@ -454,18 +463,25 @@ router.get('/orders/reference/:orderRef', apiAuth, async (req, res) => {
   try {
     const orderReference = req.params.orderRef;
     
-    // Validate order reference format (must be exactly 6 characters)
-    if (!orderReference || orderReference.length !== 6) {
+    // Validate order reference format (allow any reasonable length)
+    if (!orderReference || orderReference.trim().length === 0) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Order reference must be exactly 6 characters long' 
+        message: 'Order reference cannot be empty' 
+      });
+    }
+    
+    if (orderReference.length > 50) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Order reference cannot be longer than 50 characters' 
       });
     }
     
     // Find the order by reference, ensuring it belongs to the authenticated user
     // Case-insensitive search since we store references in uppercase
     const order = await Order.findOne({
-      orderReference: orderReference.toUpperCase(),
+      orderReference: orderReference.trim().toUpperCase(),
       user: req.user.id
     });
 
