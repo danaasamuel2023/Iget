@@ -1787,4 +1787,185 @@ router.post('/bulk-purchase', auth, validateModelsAndDb, async (req, res) => {
   }
 });
 
+/**
+ * @route   POST /api/orders/cron/check-hubnet-statuses
+ * @desc    Automated status checking for MTN Up2U orders only (for cron jobs)
+ * @access  Internal/Cron
+ */
+router.post('/cron/check-hubnet-statuses', async (req, res) => {
+  try {
+    console.log('🤖 Starting automated HubNet status check for MTN Up2U orders only...');
+    
+    // Get all pending/processing MTN Up2U orders with references from last 24 hours only
+    const mtnOrders = await Order.find({
+      bundleType: 'mtnup2u', // Only MTN Up2U orders
+      status: { $in: ['pending', 'processing'] },
+      orderReference: { $exists: true, $ne: null },
+      // Only check orders from last 24 hours
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    }).populate('user', 'phone username');
+
+    console.log(`📋 Found ${mtnOrders.length} MTN Up2U orders from last 24 hours to check`);
+
+    let updatedCount = 0;
+    let checkedCount = 0;
+    const results = [];
+
+    for (const order of mtnOrders) {
+      try {
+        checkedCount++;
+        console.log(`🔍 Checking MTN Up2U order ${order.orderReference} (${checkedCount}/${mtnOrders.length})`);
+
+        // Call HubNet API
+        const response = await fetch(`https://console.hubnet.app/live/api/context/business/transaction-checker?reference=${order.orderReference}`, {
+          method: 'GET',
+          headers: {
+            'token': 'Bearer biWUr20SFfp8W33BRThwqTkg2PhoaZTkeWx',
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000 // 10 second timeout
+        });
+
+        const result = await response.json();
+
+        if (result.status === 'success' && result.data) {
+          const externalStatus = result.data.status?.toLowerCase();
+          
+          // Auto-update if external status is delivered/completed but internal is not
+          if (externalStatus === 'delivered' && order.status !== 'completed') {
+            
+            // Update order status with automation info
+            order.status = 'completed';
+            order.completedAt = new Date();
+            order.updatedAt = new Date();
+            order.processedBy = null; // Indicates automated update
+            order.automationInfo = {
+              updatedBy: 'hubnet-automation',
+              bundleType: 'mtnup2u',
+              externalStatus: result.data,
+              automatedAt: new Date(),
+              previousStatus: order.status
+            };
+
+            await order.save();
+            updatedCount++;
+
+            results.push({
+              orderId: order._id,
+              orderReference: order.orderReference,
+              bundleType: 'mtnup2u',
+              action: 'updated_to_completed',
+              externalStatus: result.data
+            });
+
+            console.log(`✅ Auto-completed MTN Up2U order ${order.orderReference} - NO SMS sent`);
+          } else {
+            results.push({
+              orderId: order._id,
+              orderReference: order.orderReference,
+              bundleType: 'mtnup2u',
+              action: 'checked_no_update',
+              externalStatus: result.data.status,
+              internalStatus: order.status
+            });
+          }
+        } else {
+          results.push({
+            orderId: order._id,
+            orderReference: order.orderReference,
+            bundleType: 'mtnup2u',
+            action: 'api_error',
+            error: result.message || 'Unknown API error'
+          });
+        }
+
+        // Rate limiting - wait 500ms between requests
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+      } catch (error) {
+        console.error(`❌ Error checking MTN Up2U order ${order.orderReference}:`, error.message);
+        results.push({
+          orderId: order._id,
+          orderReference: order.orderReference,
+          bundleType: 'mtnup2u',
+          action: 'error',
+          error: error.message
+        });
+      }
+    }
+
+    console.log(`🎯 MTN Up2U automation complete: Checked ${checkedCount} orders, updated ${updatedCount} to completed (NO SMS sent)`);
+
+    res.json({
+      success: true,
+      message: `Checked ${checkedCount} MTN Up2U orders from last 24 hours, updated ${updatedCount} to completed (NO SMS notifications sent)`,
+      data: {
+        bundleType: 'mtnup2u',
+        checked: checkedCount,
+        updated: updatedCount,
+        results: results,
+        timeframe: '24 hours',
+        smsNotifications: false,
+        timestamp: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ MTN Up2U status check automation error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date()
+    });
+  }
+});
+
+/**
+ * @route   GET /api/orders/cron/status
+ * @desc    Get automation status and stats for MTN Up2U orders only
+ * @access  Internal
+ */
+router.get('/cron/status', async (req, res) => {
+  try {
+    // Get counts of MTN Up2U orders that could be automated (last 24 hours)
+    const pendingMtnCount = await Order.countDocuments({
+      bundleType: 'mtnup2u', // Only MTN Up2U
+      status: { $in: ['pending', 'processing'] },
+      orderReference: { $exists: true, $ne: null },
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    });
+
+    // Get count of recently automated MTN Up2U orders (last 24 hours)
+    const recentlyAutomated = await Order.countDocuments({
+      bundleType: 'mtnup2u',
+      'automationInfo.automatedAt': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    });
+
+    // Get total MTN Up2U orders in last 24 hours
+    const totalMtnOrdersLast24h = await Order.countDocuments({
+      bundleType: 'mtnup2u',
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        bundleType: 'mtnup2u',
+        pendingMtnUp2uOrders: pendingMtnCount,
+        automatedLast24h: recentlyAutomated,
+        totalMtnUp2uOrdersLast24h: totalMtnOrdersLast24h,
+        automationEnabled: true,
+        smsNotifications: false,
+        timeframe: '24 hours',
+        lastCheck: new Date()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;
