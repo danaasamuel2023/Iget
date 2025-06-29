@@ -204,6 +204,7 @@ router.get('/my-permissions', auth, adminAuth, async (req, res) => {
             canViewAdminLogs: admin.role === 'admin',
             canRewardUsers: admin.role === 'admin',
             canUpdateOrderStatus: ['admin', 'Editor'].includes(admin.role), // Editor can update orders
+            canApproveUsers: admin.role === 'admin', // NEW: User approval permission
             // New detailed permissions
             hasFullUserAccess: admin.role === 'admin',
             hasLimitedUserAccess: admin.role === 'wallet_admin', // Editors removed
@@ -229,7 +230,7 @@ router.get('/my-permissions', auth, adminAuth, async (req, res) => {
             },
             permissions,
             roleDescription: {
-                admin: 'Full administrative access to all features',
+                admin: 'Full administrative access to all features including user approval',
                 wallet_admin: 'Can view users and perform both credit and debit wallet operations',
                 Editor: 'Can ONLY view and update order statuses - NO access to users, wallets, or other admin features'
             }[admin.role]
@@ -243,6 +244,538 @@ router.get('/my-permissions', auth, adminAuth, async (req, res) => {
         });
     }
 });
+
+// ============================================
+// USER APPROVAL ROUTES (ADMIN ONLY)
+// ============================================
+
+// GET all pending approval users (ADMIN ONLY)
+router.get('/users/pending-approval', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+    
+    // Count total pending users
+    const total = await User.countDocuments({ approvalStatus: 'pending' });
+    
+    // Get pending users
+    const pendingUsers = await User.find({ approvalStatus: 'pending' })
+      .select('-password -apiKey') // Exclude sensitive fields
+      .sort({ 'approvalInfo.approvalRequestedAt': 1 }) // Oldest first
+      .skip(skip)
+      .limit(limit);
+    
+    // Log admin action
+    await logAdminAction(req.user._id, 'view_pending_approvals', null, { 
+      ipAddress: req.ip,
+      totalPending: total
+    });
+    
+    const totalPages = Math.ceil(total / limit);
+    
+    res.status(200).json({
+      success: true,
+      data: pendingUsers,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
+      },
+      message: total > 0 ? `${total} users pending approval` : 'No users pending approval'
+    });
+    
+  } catch (error) {
+    console.error('Error fetching pending approval users:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching pending approvals',
+      error: error.message
+    });
+  }
+});
+
+// GET all approved users (ADMIN ONLY)
+router.get('/users/approved', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+    
+    const total = await User.countDocuments({ approvalStatus: 'approved' });
+    
+    const approvedUsers = await User.find({ approvalStatus: 'approved' })
+      .select('-password -apiKey')
+      .populate({
+        path: 'approvalInfo.approvedBy',
+        select: 'username email'
+      })
+      .sort({ 'approvalInfo.approvedAt': -1 }) // Most recently approved first
+      .skip(skip)
+      .limit(limit);
+    
+    const totalPages = Math.ceil(total / limit);
+    
+    res.status(200).json({
+      success: true,
+      data: approvedUsers,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching approved users:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching approved users',
+      error: error.message
+    });
+  }
+});
+
+// GET all rejected users (ADMIN ONLY)
+router.get('/users/rejected', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+    
+    const total = await User.countDocuments({ approvalStatus: 'rejected' });
+    
+    const rejectedUsers = await User.find({ approvalStatus: 'rejected' })
+      .select('-password -apiKey')
+      .populate({
+        path: 'approvalInfo.rejectedBy',
+        select: 'username email'
+      })
+      .sort({ 'approvalInfo.rejectedAt': -1 }) // Most recently rejected first
+      .skip(skip)
+      .limit(limit);
+    
+    const totalPages = Math.ceil(total / limit);
+    
+    res.status(200).json({
+      success: true,
+      data: rejectedUsers,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching rejected users:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching rejected users',
+      error: error.message
+    });
+  }
+});
+
+// POST approve a user (ADMIN ONLY)
+router.post('/users/:userId/approve', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { notes, sendSMSNotification = true } = req.body; // Optional approval notes and SMS
+    
+    const user = await User.findById(userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    if (user.approvalStatus === 'approved') {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already approved'
+      });
+    }
+    
+    // Approve the user
+    user.approveUser(req.user._id, notes);
+    await user.save();
+    
+    // Send SMS notification if enabled and user has a phone number
+    let smsResult = null;
+    if (sendSMSNotification && user.phone) {
+      try {
+        const formattedPhone = formatPhoneForSms(user.phone);
+        const smsMessage = `Good news! Your account has been approved by our admin team. You can now login and use all features of our platform. Welcome aboard!`;
+        
+        smsResult = await sendSMS(formattedPhone, smsMessage, {
+          useCase: 'transactional',
+          senderID: 'EL VENDER'
+        });
+        
+        if (smsResult.success) {
+          console.log(`Approval SMS sent to: ${user.username} (${formattedPhone})`);
+        } else {
+          console.error(`Failed to send approval SMS: ${smsResult.error?.message || 'Unknown error'}`);
+        }
+      } catch (smsError) {
+        console.error('Error sending approval SMS:', smsError.message);
+        smsResult = { success: false, error: { message: smsError.message } };
+      }
+    }
+    
+    // Log admin action
+    await logAdminAction(req.user._id, 'approve_user', userId, {
+      ipAddress: req.ip,
+      approvalNotes: notes,
+      targetUser: {
+        username: user.username,
+        email: user.email
+      },
+      approvedBy: {
+        username: req.user.username,
+        role: req.user.role
+      },
+      smsNotification: smsResult ? {
+        attempted: true,
+        success: smsResult.success || false,
+        error: smsResult.error?.message || null
+      } : {
+        attempted: false,
+        reason: 'No phone number available or SMS disabled'
+      }
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'User approved successfully',
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        approvalStatus: user.approvalStatus,
+        approvedAt: user.approvalInfo.approvedAt,
+        approvedBy: req.user.username,
+        approvalNotes: notes
+      },
+      smsNotification: smsResult ? {
+        sent: smsResult.success || false,
+        error: smsResult.error?.message || null
+      } : null
+    });
+    
+  } catch (error) {
+    console.error('Error approving user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while approving user',
+      error: error.message
+    });
+  }
+});
+
+// POST reject a user (ADMIN ONLY)
+router.post('/users/:userId/reject', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { reason, sendSMSNotification = true } = req.body; // Required rejection reason
+    
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required'
+      });
+    }
+    
+    const user = await User.findById(userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    if (user.approvalStatus === 'rejected') {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already rejected'
+      });
+    }
+    
+    if (user.approvalStatus === 'approved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot reject an already approved user. Use the disable user function instead.'
+      });
+    }
+    
+    // Reject the user
+    user.rejectUser(req.user._id, reason);
+    await user.save();
+    
+    // Send SMS notification if enabled and user has a phone number
+    let smsResult = null;
+    if (sendSMSNotification && user.phone) {
+      try {
+        const formattedPhone = formatPhoneForSms(user.phone);
+        const smsMessage = `Unfortunately, your account registration has been rejected. Reason: ${reason}. Please contact support if you have questions.`;
+        
+        smsResult = await sendSMS(formattedPhone, smsMessage, {
+          useCase: 'transactional',
+          senderID: 'EL VENDER'
+        });
+        
+        if (smsResult.success) {
+          console.log(`Rejection SMS sent to: ${user.username} (${formattedPhone})`);
+        } else {
+          console.error(`Failed to send rejection SMS: ${smsResult.error?.message || 'Unknown error'}`);
+        }
+      } catch (smsError) {
+        console.error('Error sending rejection SMS:', smsError.message);
+        smsResult = { success: false, error: { message: smsError.message } };
+      }
+    }
+    
+    // Log admin action
+    await logAdminAction(req.user._id, 'reject_user', userId, {
+      ipAddress: req.ip,
+      rejectionReason: reason,
+      targetUser: {
+        username: user.username,
+        email: user.email
+      },
+      rejectedBy: {
+        username: req.user.username,
+        role: req.user.role
+      },
+      smsNotification: smsResult ? {
+        attempted: true,
+        success: smsResult.success || false,
+        error: smsResult.error?.message || null
+      } : {
+        attempted: false,
+        reason: 'No phone number available or SMS disabled'
+      }
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'User rejected successfully',
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        approvalStatus: user.approvalStatus,
+        rejectedAt: user.approvalInfo.rejectedAt,
+        rejectedBy: req.user.username,
+        rejectionReason: reason
+      },
+      smsNotification: smsResult ? {
+        sent: smsResult.success || false,
+        error: smsResult.error?.message || null
+      } : null
+    });
+    
+  } catch (error) {
+    console.error('Error rejecting user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while rejecting user',
+      error: error.message
+    });
+  }
+});
+
+// POST bulk approve users (ADMIN ONLY)
+router.post('/users/bulk-approve', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const { userIds, notes, sendSMSNotification = true } = req.body;
+    
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid userIds array is required'
+      });
+    }
+    
+    const approvedUsers = [];
+    const errors = [];
+    const smsResults = [];
+    
+    for (const userId of userIds) {
+      try {
+        const user = await User.findById(userId);
+        
+        if (!user) {
+          errors.push({ userId, error: 'User not found' });
+          continue;
+        }
+        
+        if (user.approvalStatus === 'approved') {
+          errors.push({ userId, error: 'User already approved' });
+          continue;
+        }
+        
+        user.approveUser(req.user._id, notes);
+        await user.save();
+        
+        approvedUsers.push({
+          id: user._id,
+          username: user.username,
+          email: user.email
+        });
+        
+        // Send SMS notification if enabled and user has a phone number
+        let smsResult = null;
+        if (sendSMSNotification && user.phone) {
+          try {
+            const formattedPhone = formatPhoneForSms(user.phone);
+            const smsMessage = `Good news! Your account has been approved by our admin team. You can now login and use all features of our platform. Welcome aboard!`;
+            
+            smsResult = await sendSMS(formattedPhone, smsMessage, {
+              useCase: 'transactional',
+              senderID: 'EL VENDER'
+            });
+            
+            if (smsResult.success) {
+              console.log(`Bulk approval SMS sent to: ${user.username} (${formattedPhone})`);
+            }
+          } catch (smsError) {
+            console.error('Error sending bulk approval SMS:', smsError.message);
+            smsResult = { success: false, error: { message: smsError.message } };
+          }
+        }
+        
+        smsResults.push({
+          userId: user._id,
+          username: user.username,
+          smsResult: smsResult
+        });
+        
+        // Log individual approval
+        await logAdminAction(req.user._id, 'bulk_approve_user', userId, {
+          ipAddress: req.ip,
+          bulkOperation: true,
+          approvalNotes: notes,
+          targetUser: {
+            username: user.username,
+            email: user.email
+          }
+        });
+        
+      } catch (error) {
+        errors.push({ userId, error: error.message });
+      }
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: `Bulk approval completed. ${approvedUsers.length} users approved, ${errors.length} errors.`,
+      approvedUsers,
+      errors,
+      summary: {
+        totalRequested: userIds.length,
+        successful: approvedUsers.length,
+        failed: errors.length
+      },
+      smsNotifications: {
+        attempted: smsResults.filter(r => r.smsResult !== null).length,
+        successful: smsResults.filter(r => r.smsResult?.success).length,
+        failed: smsResults.filter(r => r.smsResult && !r.smsResult.success).length
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error in bulk approval:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during bulk approval',
+      error: error.message
+    });
+  }
+});
+
+// GET approval statistics (ADMIN ONLY)
+router.get('/users/approval-stats', auth, adminAuth, requireFullAdmin, async (req, res) => {
+  try {
+    const stats = await Promise.all([
+      User.countDocuments({ approvalStatus: 'pending' }),
+      User.countDocuments({ approvalStatus: 'approved' }),
+      User.countDocuments({ approvalStatus: 'rejected' }),
+      User.countDocuments({ approvalStatus: 'approved', isActive: true }),
+      User.countDocuments({ approvalStatus: 'approved', isActive: false })
+    ]);
+    
+    const [pendingCount, approvedCount, rejectedCount, activeApprovedCount, inactiveApprovedCount] = stats;
+    
+    // Get recent approval activity (last 7 days)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const recentActivity = await Promise.all([
+      User.countDocuments({ 
+        approvalStatus: 'approved', 
+        'approvalInfo.approvedAt': { $gte: sevenDaysAgo } 
+      }),
+      User.countDocuments({ 
+        approvalStatus: 'rejected', 
+        'approvalInfo.rejectedAt': { $gte: sevenDaysAgo } 
+      }),
+      User.countDocuments({ 
+        approvalStatus: 'pending',
+        'approvalInfo.approvalRequestedAt': { $gte: sevenDaysAgo } 
+      })
+    ]);
+    
+    const [recentApprovals, recentRejections, recentRegistrations] = recentActivity;
+    
+    res.status(200).json({
+      success: true,
+      stats: {
+        pending: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+        activeApproved: activeApprovedCount,
+        inactiveApproved: inactiveApprovedCount,
+        total: pendingCount + approvedCount + rejectedCount
+      },
+      recentActivity: {
+        period: '7 days',
+        approvals: recentApprovals,
+        rejections: recentRejections,
+        newRegistrations: recentRegistrations
+      },
+      actionRequired: {
+        pendingApprovals: pendingCount,
+        urgentAction: pendingCount > 10 ? 'High number of pending approvals' : null
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching approval stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching approval statistics',
+      error: error.message
+    });
+  }
+});
+
+// ============================================
+// EXISTING USER MANAGEMENT ROUTES
+// ============================================
 
 // GET all users (ADMIN & WALLET_ADMIN ONLY - EDITORS BLOCKED)
 router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (req, res) => {
@@ -267,6 +800,11 @@ router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (r
             filter.isActive = req.query.isActive === 'true';
         }
         
+        // NEW: Filter by approval status
+        if (req.query.approvalStatus) {
+            filter.approvalStatus = req.query.approvalStatus;
+        }
+        
         if (req.query.search) {
             filter.$or = [
                 { username: { $regex: req.query.search, $options: 'i' } },
@@ -281,10 +819,18 @@ router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (r
         let responseData = {};
         
         if (req.user.role === 'admin') {
-            // Full admin gets all user data
+            // Full admin gets all user data including approval info
             selectFields = '-password -apiKey';
             const users = await User.find(filter)
                 .select(selectFields)
+                .populate({
+                    path: 'approvalInfo.approvedBy',
+                    select: 'username email'
+                })
+                .populate({
+                    path: 'approvalInfo.rejectedBy',
+                    select: 'username email'
+                })
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(limit);
@@ -308,8 +854,10 @@ router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (r
                 }
             };
         } else if (req.user.role === 'wallet_admin') {
-            // wallet_admin gets limited user data - only what they need for wallet operations
-            selectFields = 'username email wallet role isActive createdAt phone';
+            // wallet_admin gets limited user data - only approved users for wallet operations
+            filter.approvalStatus = 'approved'; // Only show approved users to wallet admins
+            
+            selectFields = 'username email wallet role isActive createdAt phone approvalStatus';
             const users = await User.find(filter)
                 .select(selectFields)
                 .sort({ createdAt: -1 })
@@ -334,7 +882,7 @@ router.get('/users', auth, adminAuth, blockEditors, requireWalletAdmin, async (r
                     timestamp: new Date()
                 },
                 limitedAccess: true,
-                note: `Limited user data for ${req.user.role} role - wallet operations only`
+                note: `Limited user data for ${req.user.role} role - wallet operations only (approved users only)`
             };
         }
         
@@ -554,6 +1102,15 @@ router.post('/users/:userId/wallet/deposit', auth, adminAuth, blockEditors, requ
             });
         }
         
+        // NEW: Check if user is approved
+        if (user.approvalStatus !== 'approved') {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot perform wallet operations on non-approved users',
+                userApprovalStatus: user.approvalStatus
+            });
+        }
+        
         // Admin is already fetched in adminAuth middleware
         const admin = req.user;
         
@@ -736,6 +1293,15 @@ router.post('/users/:userId/wallet/debit', auth, adminAuth, blockEditors, requir
             return res.status(404).json({
                 success: false,
                 message: 'User not found'
+            });
+        }
+        
+        // NEW: Check if user is approved
+        if (user.approvalStatus !== 'approved') {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot perform wallet operations on non-approved users',
+                userApprovalStatus: user.approvalStatus
             });
         }
         
@@ -970,6 +1536,7 @@ router.patch('/users/:userId/role', auth, adminAuth, blockEditors, requireFullAd
                 canChangeRoles: role === 'admin',
                 canDeleteUsers: role === 'admin',
                 canUpdateOrderStatus: ['admin', 'Editor'].includes(role),
+                canApproveUsers: role === 'admin', // NEW: User approval permission
                 isUnifiedWalletAdmin: role === 'wallet_admin',
                 isEditor: role === 'Editor'
             },
@@ -1069,6 +1636,7 @@ router.delete('/users/:userId', auth, adminAuth, blockEditors, requireFullAdmin,
             email: user.email,
             role: user.role,
             isActive: user.isActive,
+            approvalStatus: user.approvalStatus, // NEW: Include approval status
             createdAt: user.createdAt
         };
         
@@ -1239,6 +1807,7 @@ router.get('/top-sales-users', auth, adminAuth, blockEditors, requireFullAdmin, 
       
     } catch (error) {
       console.error('Error fetching top sales users:', error);
+      res
       res.status(500).json({
         success: false,
         message: 'Server error while fetching top sales users',

@@ -3,6 +3,9 @@ const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
 // Enhanced User Schema with unified admin roles
+// Enhanced User Schema with Admin Approval System
+
+// Enhanced User Schema with approval system
 const userSchema = new Schema({
   username: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
@@ -19,6 +22,30 @@ const userSchema = new Schema({
     ], 
     default: 'user' 
   },
+  
+  // NEW: Approval system fields
+  approvalStatus: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    default: 'pending'
+  },
+  
+  approvalInfo: {
+    approvedBy: { 
+      type: Schema.Types.ObjectId, 
+      ref: 'IgetUser' 
+    },
+    approvedAt: { type: Date },
+    rejectedBy: { 
+      type: Schema.Types.ObjectId, 
+      ref: 'IgetUser' 
+    },
+    rejectedAt: { type: Date },
+    rejectionReason: { type: String },
+    approvalNotes: { type: String },
+    approvalRequestedAt: { type: Date, default: Date.now }
+  },
+  
   apiKey: { type: String, unique: true },
   wallet: {
     balance: { type: Number, default: 0 },
@@ -28,7 +55,9 @@ const userSchema = new Schema({
       ref: 'IgetTransaction'
     }]
   },
-  isActive: { type: Boolean, default: true },
+  
+  // Modified: isActive now depends on approval status
+  isActive: { type: Boolean, default: false }, // Default to false until approved
   
   // Admin-specific fields for tracking
   adminMetadata: {
@@ -49,7 +78,8 @@ const userSchema = new Schema({
       canDebit: { type: Boolean, default: false },
       canChangeRoles: { type: Boolean, default: false },
       canDeleteUsers: { type: Boolean, default: false },
-      canUpdateOrderStatus: { type: Boolean, default: false }
+      canUpdateOrderStatus: { type: Boolean, default: false },
+      canApproveUsers: { type: Boolean, default: false } // NEW permission
     }
   },
   
@@ -68,7 +98,8 @@ userSchema.methods.updatePermissions = function() {
         canDebit: true,
         canChangeRoles: true,
         canDeleteUsers: true,
-        canUpdateOrderStatus: true
+        canUpdateOrderStatus: true,
+        canApproveUsers: true // Admins can approve users
       };
       break;
     case 'wallet_admin':
@@ -79,7 +110,8 @@ userSchema.methods.updatePermissions = function() {
         canDebit: true,
         canChangeRoles: false,
         canDeleteUsers: false,
-        canUpdateOrderStatus: false
+        canUpdateOrderStatus: false,
+        canApproveUsers: false // wallet_admin cannot approve users
       };
       break;
     case 'Editor':
@@ -90,7 +122,8 @@ userSchema.methods.updatePermissions = function() {
         canDebit: false,
         canChangeRoles: false,
         canDeleteUsers: false,
-        canUpdateOrderStatus: true
+        canUpdateOrderStatus: true,
+        canApproveUsers: false // Editors cannot approve users
       };
       break;
     default:
@@ -101,9 +134,46 @@ userSchema.methods.updatePermissions = function() {
         canDebit: false,
         canChangeRoles: false,
         canDeleteUsers: false,
-        canUpdateOrderStatus: false
+        canUpdateOrderStatus: false,
+        canApproveUsers: false
       };
   }
+};
+
+// NEW: Method to check if user is approved and can use the app
+userSchema.methods.canUseApp = function() {
+  return this.approvalStatus === 'approved' && this.isActive;
+};
+
+// NEW: Method to approve user
+userSchema.methods.approveUser = function(adminId, notes = '') {
+  this.approvalStatus = 'approved';
+  this.isActive = true;
+  this.approvalInfo.approvedBy = adminId;
+  this.approvalInfo.approvedAt = new Date();
+  this.approvalInfo.approvalNotes = notes;
+  this.updatedAt = new Date();
+};
+
+// NEW: Method to reject user
+userSchema.methods.rejectUser = function(adminId, reason = '') {
+  this.approvalStatus = 'rejected';
+  this.isActive = false;
+  this.approvalInfo.rejectedBy = adminId;
+  this.approvalInfo.rejectedAt = new Date();
+  this.approvalInfo.rejectionReason = reason;
+  this.updatedAt = new Date();
+};
+
+// NEW: Method to get approval status description
+userSchema.methods.getApprovalStatusDescription = function() {
+  const descriptions = {
+    'pending': 'Account pending admin approval',
+    'approved': 'Account approved and active',
+    'rejected': 'Account rejected by admin'
+  };
+  
+  return descriptions[this.approvalStatus] || 'Unknown approval status';
 };
 
 // Pre-save middleware to update permissions
@@ -135,7 +205,7 @@ userSchema.methods.hasPermission = function(permission) {
 // Method to get role description
 userSchema.methods.getRoleDescription = function() {
   const descriptions = {
-    'admin': 'Full administrative access to all features',
+    'admin': 'Full administrative access to all features including user approval',
     'wallet_admin': 'Can view users and perform both credit and debit wallet operations',
     'Editor': 'Can view users and update order statuses',
     'user': 'Regular user with standard features',
@@ -154,6 +224,34 @@ userSchema.methods.canPerformWalletOperations = function() {
 userSchema.methods.canUpdateOrderStatus = function() {
   return ['admin', 'Editor'].includes(this.role);
 };
+
+// NEW: Method to check if user can approve other users
+userSchema.methods.canApproveUsers = function() {
+  return this.role === 'admin';
+};
+
+// NEW: Static method to get pending approval users
+userSchema.statics.getPendingApprovalUsers = function() {
+  return this.find({
+    approvalStatus: 'pending'
+  }).sort({ 'approvalInfo.approvalRequestedAt': 1 }); // Oldest first
+};
+
+// NEW: Static method to get approved users
+userSchema.statics.getApprovedUsers = function() {
+  return this.find({
+    approvalStatus: 'approved'
+  }).sort({ 'approvalInfo.approvedAt': -1 }); // Most recently approved first
+};
+
+// NEW: Static method to get rejected users
+userSchema.statics.getRejectedUsers = function() {
+  return this.find({
+    approvalStatus: 'rejected'
+  }).sort({ 'approvalInfo.rejectedAt': -1 }); // Most recently rejected first
+};
+
+// module.exports = userSchema;
 
 // Bundle Schema with role-based pricing and stock management
 // Enhanced Bundle Schema with unit-based stock management
@@ -281,7 +379,7 @@ bundleSchema.methods.confirmReservation = async function(quantity = 1, session) 
   this.stockUnits.reserved -= quantity;
   this.stockUnits.sold += quantity;
   
-  if (session) {
+  if (session) { 
     return this.save({ session });
   }
   return this.save();
