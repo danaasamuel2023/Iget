@@ -1925,47 +1925,47 @@ router.post('/bulk-purchase', auth, validateModelsAndDb, async (req, res) => {
  * @desc    Get automation status and stats for MTN Up2U orders only
  * @access  Internal
  */
-router.get('/cron/status', async (req, res) => {
-  try {
-    // Get counts of MTN Up2U orders that could be automated (last 24 hours)
-    const pendingMtnCount = await Order.countDocuments({
-      bundleType: 'mtnup2u', // Only MTN Up2U
-      status: { $in: ['pending', 'processing'] },
-      orderReference: { $exists: true, $ne: null },
-      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-    });
+// router.get('/cron/status', async (req, res) => {
+//   try {
+//     // Get counts of MTN Up2U orders that could be automated (last 24 hours)
+//     const pendingMtnCount = await Order.countDocuments({
+//       bundleType: 'mtnup2u', // Only MTN Up2U
+//       status: { $in: ['pending', 'processing'] },
+//       orderReference: { $exists: true, $ne: null },
+//       createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+//     });
 
-    // Get count of recently automated MTN Up2U orders (last 24 hours)
-    const recentlyAutomated = await Order.countDocuments({
-      bundleType: 'mtnup2u',
-      'automationInfo.automatedAt': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-    });
+//     // Get count of recently automated MTN Up2U orders (last 24 hours)
+//     const recentlyAutomated = await Order.countDocuments({
+//       bundleType: 'mtnup2u',
+//       'automationInfo.automatedAt': { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+//     });
 
-    // Get total MTN Up2U orders in last 24 hours
-    const totalMtnOrdersLast24h = await Order.countDocuments({
-      bundleType: 'mtnup2u',
-      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-    });
+//     // Get total MTN Up2U orders in last 24 hours
+//     const totalMtnOrdersLast24h = await Order.countDocuments({
+//       bundleType: 'mtnup2u',
+//       createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+//     });
 
-    res.json({
-      success: true,
-      data: {
-        bundleType: 'mtnup2u',
-        pendingMtnUp2uOrders: pendingMtnCount,
-        automatedLast24h: recentlyAutomated,
-        totalMtnUp2uOrdersLast24h: totalMtnOrdersLast24h,
-        automationEnabled: true,
-        smsNotifications: false,
-        timeframe: '24 hours',
-        lastCheck: new Date()
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+//     res.json({
+//       success: true,
+//       data: {
+//         bundleType: 'mtnup2u',
+//         pendingMtnUp2uOrders: pendingMtnCount,
+//         automatedLast24h: recentlyAutomated,
+//         totalMtnUp2uOrdersLast24h: totalMtnOrdersLast24h,
+//         automationEnabled: true,
+//         smsNotifications: false,
+//         timeframe: '24 hours',
+//         lastCheck: new Date()
+//       }
+//     });
+//   } catch (error) {
+//     res.status(500).json({
+//       success: false,
+//       error: error.message
+//     });
+//   }
+// });
 
 module.exports = router;
