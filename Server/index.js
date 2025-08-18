@@ -61,98 +61,45 @@ app.get('/', (req, res) => {
 // ==============================================
 // MTN Up2U Status Automation
 // ==============================================
-// Set up automated MTN Up2U status checking every 10 minutes
-cron.schedule('*/10 * * * *', async () => {
-  try {
-    console.log('🤖 [CRON] Running automated MTN Up2U status check...');
-    
-    const fetch = (await import('node-fetch')).default;
-    
-    // Auto-detect the correct URL for development vs production
-    const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
-    const baseUrl = isProduction 
-      ? 'https://iget.onrender.com'  // Your production URL
-      : `http://localhost:${process.env.PORT || 5000}`;
-    
-    console.log('🤖 [CRON] Environment:', isProduction ? 'PRODUCTION' : 'DEVELOPMENT');
-    console.log('🤖 [CRON] Using URL:', baseUrl);
-    
-    const response = await fetch(`${baseUrl}/api/orders/cron/check-hubnet-statuses`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'User-Agent': 'iget-automation/1.0'
-      },
-      timeout: 30000 // 30 second timeout
-    });
-    
-    if (response.ok) {
-      const result = await response.json();
-      console.log('🤖 [CRON] Automation completed:', result.message);
-      
-      if (result.data?.updated > 0) {
-        console.log(`✅ [CRON] SUCCESS: ${result.data.updated} MTN Up2U orders auto-completed!`);
-      } else {
-        console.log('🔍 [CRON] No orders needed updating');
-      }
-      
-      // Log summary
-      console.log(`📊 [CRON] Summary: Checked ${result.data?.checked || 0} orders, Updated ${result.data?.updated || 0} orders`);
-      
-    } else {
-      console.error('🤖 [CRON] Automation failed:', response.status, response.statusText);
-    }
-    
-  } catch (error) {
-    console.error('🤖 [CRON] Automation error:', error.message);
-    
-    // Log more details for debugging
-    if (error.code === 'ECONNREFUSED') {
-      console.error('🤖 [CRON] Connection refused - server might be starting up');
-    } else if (error.code === 'FETCH_ERROR') {
-      console.error('🤖 [CRON] Network error - check internet connection');
-    }
-  }
-});
 
-// Additional cron job to check automation health every hour
-cron.schedule('0 * * * *', async () => {
-  try {
-    console.log('🏥 [HEALTH] Running automation health check...');
+// // Additional cron job to check automation health every hour
+// cron.schedule('0 * * * *', async () => {
+//   try {
+//     console.log('🏥 [HEALTH] Running automation health check...');
     
-    const fetch = (await import('node-fetch')).default;
-    const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
-    const baseUrl = isProduction 
-      ? 'https://iget.onrender.com'
-      : `http://localhost:${process.env.PORT || 5000}`;
+//     const fetch = (await import('node-fetch')).default;
+//     const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
+//     const baseUrl = isProduction 
+//       ? 'https://iget.onrender.com'
+//       : `http://localhost:${process.env.PORT || 5000}`;
     
-    const response = await fetch(`${baseUrl}/api/orders/cron/status`, {
-      method: 'GET',
-      headers: { 
-        'Content-Type': 'application/json',
-        'User-Agent': 'iget-health-check/1.0'
-      },
-      timeout: 15000
-    });
+//     const response = await fetch(`${baseUrl}/api/orders/cron/status`, {
+//       method: 'GET',
+//       headers: { 
+//         'Content-Type': 'application/json',
+//         'User-Agent': 'iget-health-check/1.0'
+//       },
+//       timeout: 15000
+//     });
     
-    if (response.ok) {
-      const result = await response.json();
-      console.log('🏥 [HEALTH] Automation is healthy');
-      console.log(`🏥 [HEALTH] Pending MTN Up2U orders: ${result.data?.pendingMtnUp2uOrders || 0}`);
-      console.log(`🏥 [HEALTH] Auto-completed in last 24h: ${result.data?.automatedLast24h || 0}`);
-    } else {
-      console.error('🏥 [HEALTH] Health check failed:', response.status);
-    }
+//     if (response.ok) {
+//       const result = await response.json();
+//       console.log('🏥 [HEALTH] Automation is healthy');
+//       console.log(`🏥 [HEALTH] Pending MTN Up2U orders: ${result.data?.pendingMtnUp2uOrders || 0}`);
+//       console.log(`🏥 [HEALTH] Auto-completed in last 24h: ${result.data?.automatedLast24h || 0}`);
+//     } else {
+//       console.error('🏥 [HEALTH] Health check failed:', response.status);
+//     }
     
-  } catch (error) {
-    console.error('🏥 [HEALTH] Health check error:', error.message);
-  }
-});
+//   } catch (error) {
+//     console.error('🏥 [HEALTH] Health check error:', error.message);
+//   }
+// });
 
-console.log('✅ MTN Up2U status automation initialized');
-console.log('🕐 Automation schedule: Every 10 minutes');
-console.log('🏥 Health check schedule: Every hour');
-// ==============================================
+// console.log('✅ MTN Up2U status automation initialized');
+// console.log('🕐 Automation schedule: Every 10 minutes');
+// console.log('🏥 Health check schedule: Every hour');
+// // ==============================================
 
 // Start Server
 const PORT = process.env.PORT || 5000;
