@@ -18,7 +18,10 @@ const userSchema = new Schema({
       'user',         // Regular user
       'agent',        // Agent role
       'Editor',       // Editor role - can update order statuses
-      'wallet_admin'  // Unified wallet admin - can both credit and debit user wallets
+      'wallet_admin',
+       "Business",
+     "Dealers",
+"Enterprise"  // Unified wallet admin - can both credit and debit user wallets
     ], 
     default: 'user' 
   },

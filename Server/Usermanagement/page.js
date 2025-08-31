@@ -1471,7 +1471,9 @@ router.patch('/users/:userId/role', auth, adminAuth, blockEditors, requireFullAd
         const targetUserId = req.params.userId;
         
         // Updated role list to include wallet_admin instead of separate credit/debit admins
-        if (!role || !['admin', 'user', 'agent', 'Editor', 'wallet_admin'].includes(role)) {
+        if (!role || !['admin', 'user', 'agent', 'Editor', 'wallet_admin',"Business",
+     "Dealers",
+"Enterprise" ].includes(role)) {
             return res.status(400).json({ 
                 success: false,
                 message: 'Valid role is required (admin, user, agent, Editor, or wallet_admin)' 
