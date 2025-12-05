@@ -2,10 +2,7 @@
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-// Enhanced User Schema with unified admin roles
 // Enhanced User Schema with Admin Approval System
-
-// Enhanced User Schema with approval system
 const userSchema = new Schema({
   username: { type: String, required: true, unique: true },
   email: { type: String, required: true, unique: true },
@@ -18,15 +15,15 @@ const userSchema = new Schema({
       'user',         // Regular user
       'agent',        // Agent role
       'Editor',       // Editor role - can update order statuses
-      'wallet_admin',
-       "Business",
-     "Dealers",
-"Enterprise"  // Unified wallet admin - can both credit and debit user wallets
+      'wallet_admin', // Unified wallet admin - can both credit and debit user wallets
+      'Business',
+      'Dealers',
+      'Enterprise'
     ], 
     default: 'user' 
   },
   
-  // NEW: Approval system fields
+  // Approval system fields
   approvalStatus: {
     type: String,
     enum: ['pending', 'approved', 'rejected'],
@@ -49,7 +46,9 @@ const userSchema = new Schema({
     approvalRequestedAt: { type: Date, default: Date.now }
   },
   
-  apiKey: { type: String, unique: true },
+  // FIX: Added sparse: true to allow multiple null values while maintaining uniqueness for actual keys
+  apiKey: { type: String, unique: true, sparse: true },
+  
   wallet: {
     balance: { type: Number, default: 0 },
     currency: { type: String, default: 'GHS' },
@@ -82,7 +81,7 @@ const userSchema = new Schema({
       canChangeRoles: { type: Boolean, default: false },
       canDeleteUsers: { type: Boolean, default: false },
       canUpdateOrderStatus: { type: Boolean, default: false },
-      canApproveUsers: { type: Boolean, default: false } // NEW permission
+      canApproveUsers: { type: Boolean, default: false }
     }
   },
   
@@ -102,7 +101,7 @@ userSchema.methods.updatePermissions = function() {
         canChangeRoles: true,
         canDeleteUsers: true,
         canUpdateOrderStatus: true,
-        canApproveUsers: true // Admins can approve users
+        canApproveUsers: true
       };
       break;
     case 'wallet_admin':
@@ -114,7 +113,7 @@ userSchema.methods.updatePermissions = function() {
         canChangeRoles: false,
         canDeleteUsers: false,
         canUpdateOrderStatus: false,
-        canApproveUsers: false // wallet_admin cannot approve users
+        canApproveUsers: false
       };
       break;
     case 'Editor':
@@ -126,7 +125,7 @@ userSchema.methods.updatePermissions = function() {
         canChangeRoles: false,
         canDeleteUsers: false,
         canUpdateOrderStatus: true,
-        canApproveUsers: false // Editors cannot approve users
+        canApproveUsers: false
       };
       break;
     default:
@@ -143,12 +142,12 @@ userSchema.methods.updatePermissions = function() {
   }
 };
 
-// NEW: Method to check if user is approved and can use the app
+// Method to check if user is approved and can use the app
 userSchema.methods.canUseApp = function() {
   return this.approvalStatus === 'approved' && this.isActive;
 };
 
-// NEW: Method to approve user
+// Method to approve user
 userSchema.methods.approveUser = function(adminId, notes = '') {
   this.approvalStatus = 'approved';
   this.isActive = true;
@@ -158,7 +157,7 @@ userSchema.methods.approveUser = function(adminId, notes = '') {
   this.updatedAt = new Date();
 };
 
-// NEW: Method to reject user
+// Method to reject user
 userSchema.methods.rejectUser = function(adminId, reason = '') {
   this.approvalStatus = 'rejected';
   this.isActive = false;
@@ -168,7 +167,7 @@ userSchema.methods.rejectUser = function(adminId, reason = '') {
   this.updatedAt = new Date();
 };
 
-// NEW: Method to get approval status description
+// Method to get approval status description
 userSchema.methods.getApprovalStatusDescription = function() {
   const descriptions = {
     'pending': 'Account pending admin approval',
@@ -228,41 +227,37 @@ userSchema.methods.canUpdateOrderStatus = function() {
   return ['admin', 'Editor'].includes(this.role);
 };
 
-// NEW: Method to check if user can approve other users
+// Method to check if user can approve other users
 userSchema.methods.canApproveUsers = function() {
   return this.role === 'admin';
 };
 
-// NEW: Static method to get pending approval users
+// Static method to get pending approval users
 userSchema.statics.getPendingApprovalUsers = function() {
   return this.find({
     approvalStatus: 'pending'
-  }).sort({ 'approvalInfo.approvalRequestedAt': 1 }); // Oldest first
+  }).sort({ 'approvalInfo.approvalRequestedAt': 1 });
 };
 
-// NEW: Static method to get approved users
+// Static method to get approved users
 userSchema.statics.getApprovedUsers = function() {
   return this.find({
     approvalStatus: 'approved'
-  }).sort({ 'approvalInfo.approvedAt': -1 }); // Most recently approved first
+  }).sort({ 'approvalInfo.approvedAt': -1 });
 };
 
-// NEW: Static method to get rejected users
+// Static method to get rejected users
 userSchema.statics.getRejectedUsers = function() {
   return this.find({
     approvalStatus: 'rejected'
-  }).sort({ 'approvalInfo.rejectedAt': -1 }); // Most recently rejected first
+  }).sort({ 'approvalInfo.rejectedAt': -1 });
 };
 
-// module.exports = userSchema;
 
 // Bundle Schema with role-based pricing and stock management
-// Enhanced Bundle Schema with unit-based stock management
 const bundleSchema = new Schema({
-  capacity: { type: Number, required: true }, // Data capacity in MB
-  // Base price
+  capacity: { type: Number, required: true },
   price: { type: Number, required: true },
-  // Role-specific pricing
   rolePricing: {
     admin: { type: Number },
     user: { type: Number },
@@ -275,17 +270,13 @@ const bundleSchema = new Schema({
     required: true
   },
   
-  // NEW: Unit-based stock management fields
+  // Unit-based stock management fields
   stockUnits: {
-    available: { type: Number, default: 0, min: 0 }, // Current available units
-    initial: { type: Number, default: 0, min: 0 }, // Initial stock when created/restocked
-    reserved: { type: Number, default: 0, min: 0 }, // Units reserved for pending orders
-    sold: { type: Number, default: 0, min: 0 }, // Total units sold
-    
-    // Stock threshold for low stock warnings
+    available: { type: Number, default: 0, min: 0 },
+    initial: { type: Number, default: 0, min: 0 },
+    reserved: { type: Number, default: 0, min: 0 },
+    sold: { type: Number, default: 0, min: 0 },
     lowStockThreshold: { type: Number, default: 10, min: 0 },
-    
-    // Restock history
     restockHistory: [{
       previousUnits: { type: Number },
       addedUnits: { type: Number },
@@ -294,23 +285,20 @@ const bundleSchema = new Schema({
       restockedAt: { type: Date, default: Date.now },
       reason: { type: String }
     }],
-    
-    // Last update info
     lastUpdatedBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
     lastUpdatedAt: { type: Date }
   },
   
-  // Stock management fields (automatically managed based on units)
-  isInStock: { type: Boolean, default: true }, // Automatically set based on available units
+  isInStock: { type: Boolean, default: true },
   stockStatus: {
     isOutOfStock: { type: Boolean, default: false },
-    isLowStock: { type: Boolean, default: false }, // NEW: Low stock indicator
-    reason: { type: String }, // Reason for being out of stock
+    isLowStock: { type: Boolean, default: false },
+    reason: { type: String },
     markedOutOfStockBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
     markedOutOfStockAt: { type: Date },
     markedInStockBy: { type: Schema.Types.ObjectId, ref: 'IgetUser' },
     markedInStockAt: { type: Date },
-    autoOutOfStock: { type: Boolean, default: false } // NEW: Indicates if it went out of stock automatically
+    autoOutOfStock: { type: Boolean, default: false }
   },
   
   isActive: { type: Boolean, default: true },
@@ -332,7 +320,7 @@ bundleSchema.virtual('stockPercentage').get(function() {
   return Math.round((this.stockUnits.available / this.stockUnits.initial) * 100);
 });
 
-// Virtual property to check if stock is critically low (less than 20% remaining)
+// Virtual property to check if stock is critically low
 bundleSchema.virtual('isCriticallyLow').get(function() {
   return this.stockPercentage > 0 && this.stockPercentage < 20;
 });
@@ -364,7 +352,6 @@ bundleSchema.methods.reserveStock = async function(quantity = 1, session) {
   this.stockUnits.available -= quantity;
   this.stockUnits.reserved += quantity;
   
-  // Check if we need to update stock status
   await this.updateStockStatus();
   
   if (session) {
@@ -393,7 +380,6 @@ bundleSchema.methods.releaseReservation = async function(quantity = 1, session) 
   this.stockUnits.available += quantity;
   this.stockUnits.reserved = Math.max(0, this.stockUnits.reserved - quantity);
   
-  // Check if we need to update stock status
   await this.updateStockStatus();
   
   if (session) {
@@ -405,9 +391,7 @@ bundleSchema.methods.releaseReservation = async function(quantity = 1, session) 
 // Method to update stock status based on available units
 bundleSchema.methods.updateStockStatus = async function() {
   const previousOutOfStock = this.stockStatus.isOutOfStock;
-  const previousLowStock = this.stockStatus.isLowStock;
   
-  // Check if out of stock
   if (this.stockUnits.available === 0) {
     this.isInStock = false;
     this.stockStatus.isOutOfStock = true;
@@ -425,7 +409,6 @@ bundleSchema.methods.updateStockStatus = async function() {
     }
   }
   
-  // Check if low stock
   this.stockStatus.isLowStock = this.stockUnits.available > 0 && 
                                 this.stockUnits.available <= this.stockUnits.lowStockThreshold;
 };
@@ -438,7 +421,6 @@ bundleSchema.methods.restock = async function(units, userId, reason, session) {
   
   const previousUnits = this.stockUnits.available;
   
-  // Add to restock history
   this.stockUnits.restockHistory.push({
     previousUnits: previousUnits,
     addedUnits: units,
@@ -448,16 +430,13 @@ bundleSchema.methods.restock = async function(units, userId, reason, session) {
     reason: reason || 'Manual restock'
   });
   
-  // Update stock units
   this.stockUnits.available += units;
   this.stockUnits.initial = Math.max(this.stockUnits.initial, this.stockUnits.available);
   this.stockUnits.lastUpdatedBy = userId;
   this.stockUnits.lastUpdatedAt = new Date();
   
-  // Update stock status
   await this.updateStockStatus();
   
-  // If bundle was out of stock and now has stock, update the status
   if (previousUnits === 0 && this.stockUnits.available > 0) {
     this.stockStatus.markedInStockBy = userId;
     this.stockStatus.markedInStockAt = new Date();
@@ -479,17 +458,14 @@ bundleSchema.methods.adjustStock = async function(adjustment, userId, reason, se
     throw new Error(`Cannot reduce stock below 0. Current: ${this.stockUnits.available}, Adjustment: ${adjustment}`);
   }
   
-  // If it's a positive adjustment, treat it as a restock
   if (adjustment > 0) {
     return this.restock(adjustment, userId, reason, session);
   }
   
-  // For negative adjustments
   this.stockUnits.available = newAvailable;
   this.stockUnits.lastUpdatedBy = userId;
   this.stockUnits.lastUpdatedAt = new Date();
   
-  // Add to history if it's a significant reduction
   if (adjustment < 0) {
     this.stockUnits.restockHistory.push({
       previousUnits: this.stockUnits.available - adjustment,
@@ -501,7 +477,6 @@ bundleSchema.methods.adjustStock = async function(adjustment, userId, reason, se
     });
   }
   
-  // Update stock status
   await this.updateStockStatus();
   
   this.updatedAt = new Date();
@@ -512,9 +487,8 @@ bundleSchema.methods.adjustStock = async function(adjustment, userId, reason, se
   return this.save();
 };
 
-// Pre-save middleware to update permissions and check stock
+// Pre-save middleware
 bundleSchema.pre('save', async function(next) {
-  // Update stock status if stock units changed
   if (this.isModified('stockUnits.available')) {
     await this.updateStockStatus();
   }
@@ -542,6 +516,8 @@ bundleSchema.statics.getOutOfStockBundles = function() {
 // Add toJSON to include virtuals
 bundleSchema.set('toJSON', { virtuals: true });
 bundleSchema.set('toObject', { virtuals: true });
+
+
 // Enhanced Order Schema with Editor support
 const orderSchema = new Schema({
   user: {
@@ -554,15 +530,15 @@ const orderSchema = new Schema({
     enum: ['mtnup2u', 'mtn-fibre', 'mtn-justforu', 'AT-ishare', 'Telecel-5959', 'AfA-registration', 'other'],
     required: true
   },
-  capacity: { type: Number, required: true }, // Data capacity in MB
+  capacity: { type: Number, required: true },
   price: { type: Number, required: true },
   recipientNumber: { type: String, required: true },
-  orderReference: { type: String, unique: true },
+  orderReference: { type: String, unique: true, sparse: true },
   
   // API-specific fields for external integrations
-  apiReference: { type: String }, // To store the API reference number
-  apiOrderId: { type: String },   // To store the API order ID
-  hubnetReference: { type: String }, // For Hubnet API references
+  apiReference: { type: String, sparse: true },
+  apiOrderId: { type: String, sparse: true },
+  hubnetReference: { type: String, sparse: true },
   
   status: { 
     type: String, 
@@ -607,21 +583,17 @@ const orderSchema = new Schema({
 // Generate order reference before saving
 orderSchema.pre('save', function(next) {
   if (!this.orderReference) {
-    // For API orders, check if we have an apiReference to use
     if (this.apiReference) {
       this.orderReference = this.apiReference;
     } else {
-      // Create different prefixes for different bundle types
       const prefix = this.bundleType === 'AfA-registration' ? 'AFA-' : 'ORD-';
       this.orderReference = prefix + Math.floor(1000 + Math.random() * 900000);
     }
   }
   
-  // Update timestamps
   if (this.isModified('status')) {
     this.updatedAt = new Date();
     
-    // Only set completedAt if status is specifically changed to 'completed'
     if (this.status === 'completed' && !this.completedAt) {
       this.completedAt = new Date();
     }
@@ -629,6 +601,7 @@ orderSchema.pre('save', function(next) {
   
   next();
 });
+
 
 // Enhanced Transaction Schema with unified admin tracking
 const transactionSchema = new Schema({
@@ -647,10 +620,10 @@ const transactionSchema = new Schema({
   description: { type: String, required: true },
   status: { 
     type: String, 
-    enum: ['pending', 'completed', 'failed','api_error','reward'],
+    enum: ['pending', 'completed', 'failed', 'api_error', 'reward'],
     default: 'pending'
   },
-  reference: { type: String, unique: true },
+  reference: { type: String, unique: true, sparse: true },
   orderId: {
     type: Schema.Types.ObjectId,
     ref: 'IgetOrder'
@@ -701,6 +674,7 @@ const transactionSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+
 // API Request Log Schema for comprehensive tracking
 const apiLogSchema = new Schema({
   user: {
@@ -714,8 +688,8 @@ const apiLogSchema = new Schema({
   responseData: { type: Schema.Types.Mixed },
   ipAddress: { type: String },
   userAgent: { type: String },
-  status: { type: Number }, // HTTP status code
-  executionTime: { type: Number }, // in milliseconds
+  status: { type: Number },
+  executionTime: { type: Number },
   
   // Enhanced admin tracking
   adminMetadata: {
@@ -733,6 +707,7 @@ const apiLogSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+
 // System Settings Schema
 const settingsSchema = new Schema({
   name: { type: String, required: true, unique: true },
@@ -746,6 +721,7 @@ const settingsSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+
 // Create models with consistent naming
 const UserModel = mongoose.model('IgetUser', userSchema);
 const BundleModel = mongoose.model('Bundle', bundleSchema);
@@ -754,7 +730,32 @@ const TransactionModel = mongoose.model('IgetTransaction', transactionSchema);
 const ApiLogModel = mongoose.model('ApiLog', apiLogSchema);
 const SettingsModel = mongoose.model('Settings', settingsSchema);
 
-// Export all models with the names expected by your routes
+// Auto-sync indexes on startup to fix duplicate key errors
+const syncIndexes = async () => {
+  try {
+    // Drop old non-sparse apiKey index if it exists
+    try {
+      await mongoose.connection.collection('igetusers').dropIndex('apiKey_1');
+      console.log('Dropped old apiKey index');
+    } catch (err) {
+      // Index doesn't exist or already dropped - ignore
+    }
+    
+    // Sync all model indexes
+    await UserModel.syncIndexes();
+    await OrderModel.syncIndexes();
+    await TransactionModel.syncIndexes();
+    
+    console.log('All indexes synced successfully');
+  } catch (err) {
+    console.log('Index sync error:', err.message);
+  }
+};
+
+// Run sync when MongoDB connection is open
+mongoose.connection.once('open', syncIndexes);
+
+// Export all models
 module.exports = {
   User: UserModel,
   Bundle: BundleModel,
