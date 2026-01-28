@@ -262,7 +262,10 @@ const bundleSchema = new Schema({
     admin: { type: Number },
     user: { type: Number },
     agent: { type: Number },
-    Editor: { type: Number }
+    Editor: { type: Number },
+    Business: { type: Number },
+    Dealers: { type: Number },
+    Enterprise: { type: Number }
   },
   type: { 
     type: String, 

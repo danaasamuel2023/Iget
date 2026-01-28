@@ -18,7 +18,13 @@ router.post('/', authMiddleware, async (req, res) => {
     }
     
     const user = await User.findById(req.user.id);
-    const totalAmount = bundle.price * (quantity || 1);
+
+    // Get role-based price - check rolePricing for user's role, fallback to default price
+    const userRole = user.role || 'user';
+    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole]
+      ? bundle.rolePricing[userRole]
+      : bundle.price;
+    const totalAmount = rolePrice * (quantity || 1);
     
     // Check if user has enough balance
     if (user.wallet.balance < totalAmount) {
@@ -96,7 +102,13 @@ router.post('/developer/place-order', async (req, res) => {
     }
     
     const user = req.user; // From apiAuthMiddleware
-    const totalAmount = bundle.price * (quantity || 1);
+
+    // Get role-based price - check rolePricing for user's role, fallback to default price
+    const userRole = user.role || 'user';
+    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole]
+      ? bundle.rolePricing[userRole]
+      : bundle.price;
+    const totalAmount = rolePrice * (quantity || 1);
     
     // Check if user has enough balance
     if (user.wallet.balance < totalAmount) {

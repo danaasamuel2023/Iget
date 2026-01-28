@@ -271,7 +271,10 @@ router.post('/addbundle', [authMiddleware, adminMiddleware], async (req, res) =>
         admin: price,
         user: price,
         agent: price,
-        Editor: price
+        Editor: price,
+        Business: price,
+        Dealers: price,
+        Enterprise: price
       },
       // Initialize stock units
       stockUnits: {
