@@ -28,8 +28,8 @@ router.get('/bundle', authMiddleware, async (req, res) => {
       const bundleObj = bundle.toObject();
       
       // Get the role-specific price or default to standard price
-      const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] 
-        ? bundle.rolePricing[userRole] 
+      const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] !== undefined && bundle.rolePricing[userRole] !== null
+        ? bundle.rolePricing[userRole]
         : bundle.price;
       
       // Replace the standard price with the role-specific price
@@ -116,8 +116,8 @@ router.get('/bundle/:type', authMiddleware, async (req, res) => {
       const bundleObj = bundle.toObject();
       
       // Get the role-specific price or default to standard price
-      const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] 
-        ? bundle.rolePricing[userRole] 
+      const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] !== undefined && bundle.rolePricing[userRole] !== null
+        ? bundle.rolePricing[userRole]
         : bundle.price;
       
       // Replace the standard price with the role-specific price
@@ -195,8 +195,9 @@ router.get('/bundle-details/:id', authMiddleware, async (req, res) => {
     const bundleObj = bundle.toObject();
     
     // Get the role-specific price or default to standard price
-    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] 
-      ? bundle.rolePricing[userRole] 
+    // Use explicit check for undefined/null to allow 0 as a valid price
+    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] !== undefined && bundle.rolePricing[userRole] !== null
+      ? bundle.rolePricing[userRole]
       : bundle.price;
     
     // Replace the standard price with the role-specific price

@@ -21,7 +21,7 @@ router.post('/', authMiddleware, async (req, res) => {
 
     // Get role-based price - check rolePricing for user's role, fallback to default price
     const userRole = user.role || 'user';
-    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole]
+    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] !== undefined && bundle.rolePricing[userRole] !== null
       ? bundle.rolePricing[userRole]
       : bundle.price;
     const totalAmount = rolePrice * (quantity || 1);
@@ -105,7 +105,7 @@ router.post('/developer/place-order', async (req, res) => {
 
     // Get role-based price - check rolePricing for user's role, fallback to default price
     const userRole = user.role || 'user';
-    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole]
+    const rolePrice = bundle.rolePricing && bundle.rolePricing[userRole] !== undefined && bundle.rolePricing[userRole] !== null
       ? bundle.rolePricing[userRole]
       : bundle.price;
     const totalAmount = rolePrice * (quantity || 1);
