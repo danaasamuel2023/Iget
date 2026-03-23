@@ -98,8 +98,10 @@ ConnectDB();
 // Routes
 // ==========================================
 
-// Auth routes with stricter rate limiting
-app.use('/api', authLimiter, authRoutes);
+// Auth routes — only rate limit login/register, not all /api routes
+app.use('/api/login', authLimiter);
+app.use('/api/register', authLimiter);
+app.use('/api', authRoutes);
 app.use('/api/order', dataOrderRoutes);
 app.use('/api', UserDashboard);
 app.use('/api/iget', AddBundle);
