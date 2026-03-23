@@ -39,10 +39,11 @@ router.get('/api-key', authMiddleware, async (req, res) => {
     }
     
     if (!user.apiKey) {
-      return res.status(404).json({ 
-        success: false, 
+      return res.status(200).json({
+        success: true,
         message: 'No API key found. Please generate one.',
-        hasApiKey: false
+        hasApiKey: false,
+        apiKey: null
       });
     }
     

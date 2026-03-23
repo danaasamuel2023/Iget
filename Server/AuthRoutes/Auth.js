@@ -5,20 +5,37 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { User } = require('../schema/schema'); // Import the User model from your schema file
 
-const JWT_SECRET = 'Igetbysamtech';  
-const JWT_EXPIRES_IN = '7d'; // Token validity: 7 days
+const JWT_SECRET = process.env.JWT_SECRET || 'Igetbysamtech';
+const JWT_EXPIRES_IN = '7d';
 
-// Middleware to validate request body
+// Sanitize string input — strip potential XSS/injection characters
+const sanitize = (str) => {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[<>{}$]/g, '').trim();
+};
+
+// Middleware to validate and sanitize login input
 const validateLoginInput = (req, res, next) => {
   const { username, password } = req.body;
-  
+
   if (!username || !password) {
-    return res.status(400).json({ 
-      success: false, 
-      message: 'Username and password are required' 
+    return res.status(400).json({
+      success: false,
+      message: 'Username and password are required'
     });
   }
-  
+
+  // Sanitize inputs
+  req.body.username = sanitize(username);
+
+  // Length checks
+  if (req.body.username.length > 100 || password.length > 128) {
+    return res.status(400).json({
+      success: false,
+      message: 'Input exceeds maximum length'
+    });
+  }
+
   next();
 };
 
@@ -130,8 +147,8 @@ router.post('/login', validateLoginInput, async (req, res) => {
 // ENHANCED REGISTRATION - User starts in pending status
 router.post('/register', async (req, res) => {
   try {
-    const { username, email, password, phone } = req.body;
-    
+    let { username, email, password, phone } = req.body;
+
     // Validate input
     if (!username || !email || !password || !phone) {
       return res.status(400).json({
@@ -139,7 +156,46 @@ router.post('/register', async (req, res) => {
         message: 'All fields are required'
       });
     }
-    
+
+    // Sanitize inputs
+    username = sanitize(username);
+    email = sanitize(email).toLowerCase();
+    phone = sanitize(phone);
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid email address'
+      });
+    }
+
+    // Validate phone format
+    const phoneDigits = phone.replace(/[^\d]/g, '');
+    if (phoneDigits.length < 10 || phoneDigits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid phone number'
+      });
+    }
+
+    // Password strength check
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters'
+      });
+    }
+
+    // Length limits
+    if (username.length > 50 || email.length > 100 || password.length > 128) {
+      return res.status(400).json({
+        success: false,
+        message: 'Input exceeds maximum allowed length'
+      });
+    }
+
     // Check if user already exists
     let user = await User.findOne({ 
       $or: [
